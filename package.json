@@ -1,0 +1,17 @@
+{
+  "name": "voicebridge-ai",
+  "version": "1.0.0",
+  "description": "VoiceBridge AI - Tradutor de voz PT, EN e ZH",
+  "main": "index.html",
+  "scripts": {
+    "cap:add:android": "npx cap add android",
+    "cap:sync": "npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0"
+  }
+}
