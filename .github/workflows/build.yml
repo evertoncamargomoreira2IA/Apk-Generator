@@ -1,7 +1,10 @@
 name: Build APK
 on:
   push:
+    branches: [voxlink-android]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,7 +22,27 @@ jobs:
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           gradle assembleDebug --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk VoxLink-AI.apk
       - uses: actions/upload-artifact@v4
         with:
           name: VoxLink-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: VoxLink-AI.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: voxlink-latest
+          name: VoxLink AI (última versão)
+          body: "APK gerado automaticamente a partir do branch voxlink-android (commit ${{ github.sha }})."
+          prerelease: false
+          make_latest: true
+          files: VoxLink-AI.apk
+      - name: Save APK to apk-build branch
+        run: |
+          mkdir /tmp/out && cp VoxLink-AI.apk /tmp/out/
+          cd /tmp/out
+          git init -q -b apk-build
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add VoxLink-AI.apk
+          git commit -qm "APK ${{ github.sha }}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" apk-build
