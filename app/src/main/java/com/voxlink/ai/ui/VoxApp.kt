@@ -102,13 +102,14 @@ private val White = Color(0xFFEFF7FF)
 private val Line = Color(0xFF164A76)
 
 @Composable
-fun VoxApp(vm: MainViewModel, onMic: () -> Unit, requestPermissions: (List<String>, () -> Unit) -> Unit) {
+fun VoxApp(vm: MainViewModel, onMic: () -> Unit, startMic: () -> Unit, requestPermissions: (List<String>, () -> Unit) -> Unit) {
     val ctx = LocalContext.current
     val view = LocalView.current
     var showSettings by remember { mutableStateOf(false) }
     var faceToFace by remember { mutableStateOf(false) }
     var showSync by remember { mutableStateOf(false) }
     var showCamera by remember { mutableStateOf(false) }
+    var showLecture by remember { mutableStateOf(false) }
 
     SideEffect { view.keepScreenOn = vm.sessionActive && vm.settings.keepScreenOn }
     LaunchedEffect(vm.toast) {
@@ -140,13 +141,17 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit, requestPermissions: (List<Strin
                     BackHandler { faceToFace = false }
                     FaceToFaceScreen(vm, onMic) { faceToFace = false }
                 }
+                showLecture -> {
+                    BackHandler { vm.stopLecture(); showLecture = false }
+                    LectureScreen(vm, startMic, onExport = { word -> shareMinutes(ctx, vm, word) }) { showLecture = false }
+                }
                 showCamera -> {
                     BackHandler { showCamera = false }
                     CameraScreen(vm, requestPermissions) { showCamera = false }
                 }
                 else -> MainScreenWrapper(
                     vm, onMic, openSettings = { showSettings = true }, openFaceToFace = { faceToFace = true },
-                    openSync = { showSync = true }, openCamera = { showCamera = true },
+                    openSync = { showSync = true }, openCamera = { showCamera = true }, openLecture = { showLecture = true },
                 )
             }
         }
@@ -155,10 +160,20 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit, requestPermissions: (List<Strin
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun MainScreenWrapper(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit, openCamera: () -> Unit) {
+private fun MainScreenWrapper(
+    vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit,
+    openCamera: () -> Unit, openLecture: () -> Unit,
+) {
     val ctx = LocalContext.current
     var editing by remember { mutableStateOf<com.voxlink.ai.model.Entry?>(null) }
-    val onExport: (Boolean) -> Unit = { word ->
+    val onExport: (Boolean) -> Unit = { word -> shareMinutes(ctx, vm, word) }
+    MainScreen(vm, onMic, openSettings, openFaceToFace, openSync, openCamera, openLecture, onExport) { editing = it }
+    editing?.let { e -> CorrectionDialog(vm, e) { editing = null } }
+}
+
+/** Builds the minutes file and opens the Android share sheet (e-mail, WhatsApp, Teams…). */
+fun shareMinutes(ctx: android.content.Context, vm: MainViewModel, word: Boolean) {
+    run {
         vm.exportMinutes(word)?.let { f ->
             val uri = androidx.core.content.FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
             val mime = if (word) "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -171,15 +186,13 @@ private fun MainScreenWrapper(vm: MainViewModel, onMic: () -> Unit, openSettings
             }, "Enviar ata"))
         }
     }
-    MainScreen(vm, onMic, openSettings, openFaceToFace, openSync, openCamera, onExport) { editing = it }
-    editing?.let { e -> CorrectionDialog(vm, e) { editing = null } }
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun MainScreen(
     vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit,
-    openCamera: () -> Unit, onExport: (Boolean) -> Unit, onEdit: (com.voxlink.ai.model.Entry) -> Unit,
+    openCamera: () -> Unit, openLecture: () -> Unit, onExport: (Boolean) -> Unit, onEdit: (com.voxlink.ai.model.Entry) -> Unit,
 ) {
     val ctx = LocalContext.current
     val s = vm.settings
@@ -250,7 +263,7 @@ private fun MainScreen(
             }
         }
 
-        item { ToolsRow(vm, openCamera, onExport) }
+        item { ToolsRow(vm, openCamera, openLecture, onExport) }
 
         item { Waveform(active = vm.listening || vm.speaking, level = if (vm.speaking) .7f else vm.rms, speaking = vm.speaking) }
 
@@ -322,13 +335,11 @@ private fun MainScreen(
             }
         }
 
-        // Status
+        // Status: colour of the language being listened to, blinking while someone speaks
         item {
-            val active = vm.listening || vm.speaking || vm.translating
-            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(if (active) Green else Muted))
-                Spacer(Modifier.width(8.dp))
-                Text(vm.status, color = if (active) Green else Muted, fontSize = 13.sp)
+            Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                SpeechIndicator(vm, if (vm.syncConnected) vm.settings.me else vm.listenLang)
+                Text(vm.status, color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp, start = 4.dp))
             }
         }
 
@@ -473,7 +484,7 @@ private fun Waveform(active: Boolean, level: Float, speaking: Boolean) {
 }
 
 @Composable
-private fun PinyinLine(text: String, enabled: Boolean, big: Boolean = false, small: Boolean = false, known: String? = null) {
+internal fun PinyinLine(text: String, enabled: Boolean, big: Boolean = false, small: Boolean = false, known: String? = null) {
     if (!enabled) return
     val py = known ?: remember(text) { Pinyin.of(text) } ?: return
     Text(
@@ -584,13 +595,14 @@ private fun ModeBanner(color: Color, title: String, line: String, action: String
 }
 
 @Composable
-private fun ToolsRow(vm: MainViewModel, openCamera: () -> Unit, onExport: (Boolean) -> Unit) {
+private fun ToolsRow(vm: MainViewModel, openCamera: () -> Unit, openLecture: () -> Unit, onExport: (Boolean) -> Unit) {
     val s = vm.settings
     var glossMenu by remember { mutableStateOf(false) }
     var exportMenu by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        ToolChip("📷 Câmera", Modifier.weight(1f)) { openCamera() }
-        Box(Modifier.weight(1.3f)) {
+        ToolChip("🎤 Palestra", Modifier.weight(1.1f)) { openLecture() }
+        ToolChip("📷", Modifier.weight(0.55f)) { openCamera() }
+        Box(Modifier.weight(1.2f)) {
             ToolChip("📘 " + (if (s.technicalMode) s.activeGlossary else "sem glossário") + " ▾", Modifier.fillMaxWidth(), active = s.technicalMode) { glossMenu = true }
             DropdownMenu(expanded = glossMenu, onDismissRequest = { glossMenu = false }) {
                 s.glossaries.keys.forEach { n ->
@@ -599,8 +611,8 @@ private fun ToolsRow(vm: MainViewModel, openCamera: () -> Unit, onExport: (Boole
                 DropdownMenuItem(text = { Text("Sem glossário") }, onClick = { glossMenu = false; vm.update { it.copy(technicalMode = false) } })
             }
         }
-        Box(Modifier.weight(1f)) {
-            ToolChip("📄 Ata ▾", Modifier.fillMaxWidth()) { exportMenu = true }
+        Box(Modifier.weight(0.8f)) {
+            ToolChip("📄 Ata", Modifier.fillMaxWidth()) { exportMenu = true }
             DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
                 DropdownMenuItem(text = { Text("Excel (.xlsx)") }, onClick = { exportMenu = false; onExport(false) })
                 DropdownMenuItem(text = { Text("Word (.docx)") }, onClick = { exportMenu = false; onExport(true) })
@@ -929,6 +941,8 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
 
         Section("Fone de ouvido")
         SwitchRow("Fone para mim, alto-falante para o colega", s.splitAudio) { v -> vm.update { it.copy(splitAudio = v) } }
+        SwitchRow("Ouvir enquanto o app fala (só com fone)", s.listenWhileSpeaking) { v -> vm.update { it.copy(listenWhileSpeaking = v) } }
+        Hint("Desligado (padrão): o microfone para enquanto o app fala e volta assim que termina — nunca traduz a própria voz.")
         Hint("Com fone Bluetooth/com fio conectado: a tradução para o seu idioma toca só no seu fone (e o microfone continua ouvindo, sem espera); a tradução para o colega sai no alto-falante do celular.")
 
         Row(Modifier.padding(top = 8.dp)) {

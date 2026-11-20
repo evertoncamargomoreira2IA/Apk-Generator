@@ -87,6 +87,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     var liveTranslation by mutableStateOf(""); private set
     /** Time from end of speech to translation ready, e.g. "0,4 s". */
     var lastLatency by mutableStateOf(""); private set
+    /** True while someone is speaking (drives the blinking language-coloured indicator). */
+    var voiceActive by mutableStateOf(false); private set
+
+    // ---- lecture ("Palestra") mode ----
+    var lectureActive by mutableStateOf(false); private set
+    var lectureSpeaker by mutableStateOf(settings.other); private set
+    var lectureTarget by mutableStateOf(settings.me); private set
+    var lectureStart by mutableStateOf(0L); private set
+    private val lectureEndQueue = mutableListOf<Pair<String, Lang>>()
+    private var voiceOffJob: Job? = null
     var androidVoices by mutableStateOf<List<Voice>>(emptyList()); private set
     var androidEngines by mutableStateOf<List<TextToSpeech.EngineInfo>>(emptyList()); private set
     var toast by mutableStateOf<String?>(null)
@@ -179,7 +189,55 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     /** In offline and two-phone modes the language is fixed (no detection, no automatic switching). */
-    private val fixedLanguage: Boolean get() = offlineNow || syncConnected
+    private val fixedLanguage: Boolean get() = offlineNow || syncConnected || lectureActive
+
+    // ================= Lecture mode =================
+
+    /** Starts (or re-targets) the lecture: one speaker talks, the app translates every pause. */
+    fun startLecture(speaker: Lang, target: Lang) {
+        lectureSpeaker = speaker
+        lectureTarget = if (target == speaker) other(speaker) else target
+        if (!lectureActive) {
+            lectureActive = true
+            lectureStart = System.currentTimeMillis()
+            lectureEndQueue.clear()
+        }
+        listenLang = speaker
+        if (sessionActive && !paused && !micPausedForTts) {
+            restartJob?.cancel()
+            speech.cancel()
+            restartSoon(200)
+        }
+    }
+
+    fun setLectureSpeaker(l: Lang) = startLecture(l, if (l == lectureTarget) other(l) else lectureTarget)
+    fun setLectureTarget(l: Lang) = startLecture(if (l == lectureSpeaker) other(l) else lectureSpeaker, l)
+    fun swapLecture() = startLecture(lectureTarget, lectureSpeaker)
+
+    /** Leaves lecture mode. In "read at the end" mode, reads the whole translation now. */
+    fun stopLecture() {
+        if (!lectureActive) return
+        if (pendingText.isNotBlank()) flushNow()
+        lectureActive = false
+        stopSession()
+        if (settings.lectureVoice == "AT_END" && lectureEndQueue.isNotEmpty() && !muted) {
+            val items = lectureEndQueue.toList()
+            lectureEndQueue.clear()
+            items.forEach { (t, l) -> enqueueSpeech(t, l, force = true) }
+        }
+    }
+
+    /** Lecture entries in chronological order. */
+    fun lectureEntries(): List<Entry> = history.filter { it.time >= lectureStart }.reversed()
+
+    private fun markVoice() {
+        voiceActive = true
+        voiceOffJob?.cancel()
+        voiceOffJob = viewModelScope.launch {
+            delay(700)
+            voiceActive = false
+        }
+    }
 
     // ================= Session control =================
 
@@ -202,6 +260,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (pendingText.isNotBlank()) flushNow()
         sessionActive = false
         paused = false
+        voiceActive = false
         liveJob?.cancel()
         liveTranslation = ""
         restartJob?.cancel()
@@ -233,6 +292,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     /** Choose which language is spoken next (chip tap / face-to-face half / offline direction). */
     fun listenFor(l: Lang) {
+        if (lectureActive) {
+            setLectureSpeaker(l)
+            return
+        }
         if (syncConnected && l != settings.me) {
             toast = "Com dois celulares, cada um ouve só o seu dono (${settings.me.label})."
             return
@@ -255,6 +318,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     private fun startListening() {
         if (!sessionActive || paused || micPausedForTts) return
         if (syncConnected) listenLang = settings.me
+        if (lectureActive) listenLang = lectureSpeaker
         recLang = listenLang
         speech.silenceMs = (settings.endPause * 1000).toLong()
         speech.preferOffline = offlineNow || (settings.onDeviceRecognition && recLang !in onDeviceFailed)
@@ -282,15 +346,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     override fun onSpeechStart() {
+        markVoice()
         flushJob?.cancel()
         status = "Captando fala…"
     }
 
     override fun onRms(db: Float) {
         rms = ((db + 2f) / 12f).coerceIn(0f, 1f)
+        if (rms > 0.55f && listening) markVoice()
     }
 
     override fun onPartial(text: String) {
+        markVoice()
         flushJob?.cancel()
         partial = text
         scheduleLivePreview()
@@ -435,6 +502,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         val src = if (fixedLanguage || typed) heard else detector.detect(text, heard, null, setOf(s.me, s.other))
         val tgt = when {
             syncConnected -> partnerLang ?: s.other
+            lectureActive -> lectureTarget
             src == s.me -> s.other
             src == s.other -> s.me
             heard == s.me -> s.other
@@ -487,6 +555,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         }
 
         if (s.autoSwitch && sessionActive && !fixedLanguage) listenLang = tgt
+
+        if (lectureActive) {
+            when (s.lectureVoice) {
+                "SILENT" -> status = "Legenda pronta"
+                "AT_END" -> { lectureEndQueue += out to tgt; status = "Guardado para ler no final" }
+                else -> if (!muted) enqueueSpeech(out, tgt)
+            }
+            return
+        }
 
         if (s.autoSpeak && !muted) {
             enqueueSpeech(out, tgt)
@@ -578,7 +655,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                     val (t, l) = playQueue.removeFirst()
                     val device = outputFor(l)
                     // To MY headphones: keep listening (full duplex). To the loudspeaker: pause the mic.
-                    if (!router.isHeadphones(device) && !micPausedForTts) {
+                    // Default: the mic never listens while the app speaks. Only with headphones AND the option on.
+                    val duplex = router.isHeadphones(device) && settings.listenWhileSpeaking
+                    if (!duplex && !micPausedForTts) {
+                        voiceActive = false
                         micPausedForTts = true
                         restartJob?.cancel()
                         flushJob?.cancel()

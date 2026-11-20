@@ -31,6 +31,7 @@ class MainActivity : ComponentActivity() {
             VoxApp(
                 vm,
                 onMic = { if (vm.sessionActive) vm.stopSession() else requestAndStart() },
+                startMic = { if (!vm.sessionActive) requestAndStart() },
                 requestPermissions = { perms, then -> requestPerms(perms, then) },
             )
         }

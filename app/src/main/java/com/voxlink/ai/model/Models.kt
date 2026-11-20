@@ -86,6 +86,10 @@ data class AppSettings(
     val liveSubtitles: Boolean = true,
     /** Quick phrases (one per line, in my language) shown as buttons. */
     val quickPhrases: String = DEFAULT_QUICK_PHRASES,
+    /** Keep the microphone open while the app speaks (only with headphones). Off = mic pauses while speaking. */
+    val listenWhileSpeaking: Boolean = false,
+    /** Lecture mode voice: EACH = speak after every pause, SILENT = subtitles only, AT_END = read everything at the end. */
+    val lectureVoice: String = "EACH",
     /** With headphones connected: my language → headphones, the other person's language → loudspeaker. */
     val splitAudio: Boolean = true,
 ) {

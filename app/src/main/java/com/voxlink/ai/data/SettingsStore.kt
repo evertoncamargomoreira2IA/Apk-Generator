@@ -42,6 +42,8 @@ class SettingsStore(context: Context) {
             fastVoice = p.getBoolean("fastVoice", d.fastVoice),
             liveSubtitles = p.getBoolean("liveSubtitles", d.liveSubtitles),
             quickPhrases = p.getString("quickPhrases", d.quickPhrases) ?: d.quickPhrases,
+            listenWhileSpeaking = p.getBoolean("listenWhileSpeaking", d.listenWhileSpeaking),
+            lectureVoice = p.getString("lectureVoice", d.lectureVoice) ?: d.lectureVoice,
             splitAudio = p.getBoolean("splitAudio", d.splitAudio),
         )
     }
@@ -72,6 +74,8 @@ class SettingsStore(context: Context) {
             .putBoolean("fastVoice", s.fastVoice)
             .putBoolean("liveSubtitles", s.liveSubtitles)
             .putString("quickPhrases", s.quickPhrases)
+            .putBoolean("listenWhileSpeaking", s.listenWhileSpeaking)
+            .putString("lectureVoice", s.lectureVoice)
             .putBoolean("splitAudio", s.splitAudio)
             .apply()
     }

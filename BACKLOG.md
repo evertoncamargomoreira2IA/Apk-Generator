@@ -1,6 +1,6 @@
 # VoxLink AI — fila de melhorias
 
-## Pendente (pedido em 20/11/2026)
+## Entregue na v1.7
 
 ### Modo Palestra / Speech — tradução contínua em tempo real
 Para quando uma pessoa fala por muito tempo (treinamento, reunião, apresentação de fornecedor).
@@ -17,6 +17,7 @@ Para quando uma pessoa fala por muito tempo (treinamento, reunião, apresentaç�
 - Com dois celulares: a legenda da palestra aparece ao vivo no celular do outro.
 
 ## Já entregue
+- v1.7 — Modo Palestra (mãos livres, indicador colorido piscando por idioma, traduz e fala após a pausa, microfone pausado enquanto o app fala)
 - v1.6 — glossários por área, corrigir e ensinar, ata Excel/Word, câmera (OCR)
 - v1.5 — digitar para traduzir + frases rápidas
 - v1.4 — modo rápido (tudo no aparelho), legenda ao vivo, medidor ⏱
