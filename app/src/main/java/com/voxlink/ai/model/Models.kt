@@ -82,6 +82,8 @@ data class AppSettings(
     val fastVoice: Boolean = true,
     /** Show the translation live while the person is still talking. */
     val liveSubtitles: Boolean = true,
+    /** Quick phrases (one per line, in my language) shown as buttons. */
+    val quickPhrases: String = DEFAULT_QUICK_PHRASES,
     /** With headphones connected: my language → headphones, the other person's language → loudspeaker. */
     val splitAudio: Boolean = true,
 )
@@ -91,6 +93,16 @@ val SAMPLE_PHRASES = mapOf(
     Lang.EN to "The equipment installation is complete. We start testing tomorrow.",
     Lang.ZH to "设备安装已经完成，我们明天开始测试。",
 )
+
+const val DEFAULT_QUICK_PHRASES = """Pode repetir, por favor?
+Fale mais devagar, por favor.
+Entendi.
+Um momento, por favor.
+Onde está o problema?
+Vamos testar agora.
+Está aprovado.
+Não está conforme.
+Obrigado!"""
 
 const val DEFAULT_GLOSSARY = """# Glossário técnico — formato: português | english | 中文
 linha de produção | production line | 生产线

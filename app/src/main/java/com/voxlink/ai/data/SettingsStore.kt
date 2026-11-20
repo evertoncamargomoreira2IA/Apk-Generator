@@ -40,6 +40,7 @@ class SettingsStore(context: Context) {
             onDeviceRecognition = p.getBoolean("onDeviceRecognition", d.onDeviceRecognition),
             fastVoice = p.getBoolean("fastVoice", d.fastVoice),
             liveSubtitles = p.getBoolean("liveSubtitles", d.liveSubtitles),
+            quickPhrases = p.getString("quickPhrases", d.quickPhrases) ?: d.quickPhrases,
             splitAudio = p.getBoolean("splitAudio", d.splitAudio),
         )
     }
@@ -68,6 +69,7 @@ class SettingsStore(context: Context) {
             .putBoolean("onDeviceRecognition", s.onDeviceRecognition)
             .putBoolean("fastVoice", s.fastVoice)
             .putBoolean("liveSubtitles", s.liveSubtitles)
+            .putString("quickPhrases", s.quickPhrases)
             .putBoolean("splitAudio", s.splitAudio)
             .apply()
     }

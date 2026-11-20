@@ -424,14 +424,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     // ================= Translation =================
 
-    private suspend fun process(text: String, heard: Lang) {
+    private suspend fun process(text: String, heard: Lang, typed: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (text.equals(lastFinalText, ignoreCase = true) && now - lastFinalAt < 5000) return
+        if (!typed && text.equals(lastFinalText, ignoreCase = true) && now - lastFinalAt < 5000) return
         lastFinalText = text
         lastFinalAt = now
 
         val s = settings
-        val src = if (fixedLanguage) heard else detector.detect(text, heard, null, setOf(s.me, s.other))
+        val src = if (fixedLanguage || typed) heard else detector.detect(text, heard, null, setOf(s.me, s.other))
         val tgt = when {
             syncConnected -> partnerLang ?: s.other
             src == s.me -> s.other
@@ -641,6 +641,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         muted = !muted
         if (muted) stopPlayback()
         toast = if (muted) "Voz da tradução silenciada" else "Voz da tradução ativada"
+    }
+
+    /**
+     * Typed input (keyboard or quick phrase): translated, shown with pinyin and spoken —
+     * or sent to the other phone when the two phones are connected.
+     */
+    fun sendTyped(text: String, from: Lang) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        flushAt = System.currentTimeMillis()
+        viewModelScope.launch { processLock.withLock { process(t, from, typed = true) } }
     }
 
     fun testVoice(lang: Lang) = enqueueSpeech(SAMPLE_PHRASES.getValue(lang), lang, force = true)

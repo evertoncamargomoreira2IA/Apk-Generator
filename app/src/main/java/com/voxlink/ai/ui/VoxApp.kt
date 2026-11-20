@@ -34,6 +34,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -310,6 +314,9 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
             }
         }
 
+        // Typed input + quick phrases (works in both phones when connected)
+        item { TypeBar(vm) }
+
         // History
         item {
             Row(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -533,6 +540,57 @@ private fun ModeBanner(color: Color, title: String, line: String, action: String
             Text(line, color = White, fontSize = if (big) 18.sp else 14.sp, fontWeight = FontWeight.SemiBold)
         }
         Button(onClick = onAction, colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Bg)) { Text(action) }
+    }
+}
+
+@Composable
+private fun TypeBar(vm: MainViewModel) {
+    val s = vm.settings
+    var text by remember { mutableStateOf("") }
+    var from by remember(s.me) { mutableStateOf(s.me) }
+    val to = if (vm.syncConnected) (vm.partnerLang ?: s.other) else vm.other(from)
+    fun send() {
+        if (text.isNotBlank()) {
+            vm.sendTyped(text, from)
+            text = ""
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(top = 14.dp)) {
+        Text(
+            "⌨ DIGITAR " + if (vm.syncConnected) "· vai para ${vm.partnerName ?: "o outro celular"}" else "· o app fala a tradução",
+            color = Color(0xFF55D3FF), fontSize = 11.sp, letterSpacing = 1.sp,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            Box(
+                Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, Line, RoundedCornerShape(12.dp))
+                    .clickable { if (!vm.syncConnected) from = vm.other(from) }
+                    .padding(horizontal = 10.dp, vertical = 14.dp)
+            ) { Text("${from.flag}→${to.flag}", fontSize = 16.sp) }
+            Spacer(Modifier.width(6.dp))
+            OutlinedTextField(
+                value = text, onValueChange = { text = it },
+                placeholder = { Text("Digite em ${from.label}…", fontSize = 14.sp) },
+                modifier = Modifier.weight(1f), maxLines = 4,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { send() }),
+            )
+            Spacer(Modifier.width(6.dp))
+            Button(onClick = { send() }, enabled = text.isNotBlank(), shape = CircleShape) { Text("➤") }
+        }
+        PinyinLine(text, s.showPinyin, small = true)
+        val phrases = remember(s.quickPhrases) { s.quickPhrases.lines().map { it.trim() }.filter { it.isNotEmpty() } }
+        if (phrases.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp)) {
+                phrases.forEach { p ->
+                    Box(
+                        Modifier.padding(end = 6.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF0A1A2E))
+                            .border(1.dp, Color(0xFF15578A), RoundedCornerShape(14.dp))
+                            .clickable { vm.sendTyped(p, s.me) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) { Text(p, color = Color(0xFFC7DEF8), fontSize = 13.sp, maxLines = 1) }
+                }
+            }
+        }
     }
 }
 
@@ -786,6 +844,17 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
         )
         Button(onClick = { vm.update { it.copy(glossary = glossaryText) }; vm.toast = "Glossário salvo" }, modifier = Modifier.padding(top = 6.dp)) {
             Text("Salvar glossário")
+        }
+
+        Section("Frases rápidas")
+        var phrasesText by remember { mutableStateOf(s.quickPhrases) }
+        OutlinedTextField(
+            value = phrasesText, onValueChange = { phrasesText = it },
+            label = { Text("Uma frase por linha, no seu idioma (${s.me.label})") },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp), textStyle = MaterialTheme.typography.bodySmall,
+        )
+        Button(onClick = { vm.update { it.copy(quickPhrases = phrasesText) }; vm.toast = "Frases salvas" }, modifier = Modifier.padding(top = 6.dp)) {
+            Text("Salvar frases")
         }
 
         Section("Dois celulares")
