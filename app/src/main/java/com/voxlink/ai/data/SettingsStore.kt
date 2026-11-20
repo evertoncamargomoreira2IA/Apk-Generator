@@ -29,7 +29,8 @@ class SettingsStore(context: Context) {
                 .toMap(),
             translationMode = runCatching { TranslationMode.valueOf(p.getString("translationMode", null)!!) }.getOrDefault(d.translationMode),
             technicalMode = p.getBoolean("technicalMode", d.technicalMode),
-            glossary = p.getString("glossary", d.glossary) ?: d.glossary,
+            glossaries = loadGlossaries(d),
+            activeGlossary = p.getString("activeGlossary", d.activeGlossary) ?: d.activeGlossary,
             saveHistory = p.getBoolean("saveHistory", d.saveHistory),
             keepScreenOn = p.getBoolean("keepScreenOn", d.keepScreenOn),
             forceOffline = p.getBoolean("forceOffline", d.forceOffline),
@@ -58,7 +59,8 @@ class SettingsStore(context: Context) {
             .putString("androidVoices", s.androidVoices.entries.joinToString(";") { "${it.key}=${it.value}" })
             .putString("translationMode", s.translationMode.name)
             .putBoolean("technicalMode", s.technicalMode)
-            .putString("glossary", s.glossary)
+            .putString("glossaries", JSONObject().apply { s.glossaries.forEach { (k, v) -> put(k, v) } }.toString())
+            .putString("activeGlossary", s.activeGlossary)
             .putBoolean("saveHistory", s.saveHistory)
             .putBoolean("keepScreenOn", s.keepScreenOn)
             .putBoolean("forceOffline", s.forceOffline)
@@ -73,6 +75,39 @@ class SettingsStore(context: Context) {
             .putBoolean("splitAudio", s.splitAudio)
             .apply()
     }
+
+    private fun loadGlossaries(d: AppSettings): Map<String, String> {
+        p.getString("glossaries", null)?.let { raw ->
+            runCatching {
+                val o = JSONObject(raw)
+                val m = LinkedHashMap<String, String>()
+                o.keys().forEach { k -> m[k] = o.getString(k) }
+                if (m.isNotEmpty()) return m
+            }
+        }
+        // First run of v1.6: keep the glossary the user already edited as "Geral".
+        val m = LinkedHashMap(d.glossaries)
+        p.getString("glossary", null)?.let { m["Geral"] = it }
+        return m
+    }
+
+    // ---- translation memory: corrected sentences are reused exactly next time ----
+    private fun tmKey(text: String, from: Lang, to: Lang) =
+        "${from.code}|${to.code}|" + text.lowercase().trim().replace(Regex("\\s+"), " ").trimEnd('.', '!', '?', '。', '！', '？', ',', '，')
+
+    fun memoryLookup(text: String, from: Lang, to: Lang): String? = runCatching {
+        JSONObject(p.getString("tm", "{}")).optString(tmKey(text, from, to), "").ifBlank { null }
+    }.getOrNull()
+
+    fun memorySave(text: String, from: Lang, to: Lang, corrected: String) {
+        val o = runCatching { JSONObject(p.getString("tm", "{}")) }.getOrDefault(JSONObject())
+        o.put(tmKey(text, from, to), corrected)
+        p.edit().putString("tm", o.toString()).apply()
+    }
+
+    fun memorySize(): Int = runCatching { JSONObject(p.getString("tm", "{}")).length() }.getOrDefault(0)
+
+    fun memoryClear() { p.edit().remove("tm").apply() }
 
     fun saveHistory(items: List<Entry>) {
         val arr = JSONArray()

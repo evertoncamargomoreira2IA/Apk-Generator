@@ -20,6 +20,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -107,6 +108,7 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit, requestPermissions: (List<Strin
     var showSettings by remember { mutableStateOf(false) }
     var faceToFace by remember { mutableStateOf(false) }
     var showSync by remember { mutableStateOf(false) }
+    var showCamera by remember { mutableStateOf(false) }
 
     SideEffect { view.keepScreenOn = vm.sessionActive && vm.settings.keepScreenOn }
     LaunchedEffect(vm.toast) {
@@ -138,14 +140,47 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit, requestPermissions: (List<Strin
                     BackHandler { faceToFace = false }
                     FaceToFaceScreen(vm, onMic) { faceToFace = false }
                 }
-                else -> MainScreen(vm, onMic, openSettings = { showSettings = true }, openFaceToFace = { faceToFace = true }, openSync = { showSync = true })
+                showCamera -> {
+                    BackHandler { showCamera = false }
+                    CameraScreen(vm, requestPermissions) { showCamera = false }
+                }
+                else -> MainScreenWrapper(
+                    vm, onMic, openSettings = { showSettings = true }, openFaceToFace = { faceToFace = true },
+                    openSync = { showSync = true }, openCamera = { showCamera = true },
+                )
             }
         }
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit) {
+private fun MainScreenWrapper(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit, openCamera: () -> Unit) {
+    val ctx = LocalContext.current
+    var editing by remember { mutableStateOf<com.voxlink.ai.model.Entry?>(null) }
+    val onExport: (Boolean) -> Unit = { word ->
+        vm.exportMinutes(word)?.let { f ->
+            val uri = androidx.core.content.FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
+            val mime = if (word) "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "Ata de conversa — VoxLink AI")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }, "Enviar ata"))
+        }
+    }
+    MainScreen(vm, onMic, openSettings, openFaceToFace, openSync, openCamera, onExport) { editing = it }
+    editing?.let { e -> CorrectionDialog(vm, e) { editing = null } }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun MainScreen(
+    vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit,
+    openCamera: () -> Unit, onExport: (Boolean) -> Unit, onEdit: (com.voxlink.ai.model.Entry) -> Unit,
+) {
     val ctx = LocalContext.current
     val s = vm.settings
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -215,6 +250,8 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
             }
         }
 
+        item { ToolsRow(vm, openCamera, onExport) }
+
         item { Waveform(active = vm.listening || vm.speaking, level = if (vm.speaking) .7f else vm.rms, speaking = vm.speaking) }
 
         // Original speech
@@ -270,6 +307,9 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     OutlinedButton(onClick = { vm.replay() }, shape = CircleShape, border = BorderStroke(1.dp, Color(0xFF177A63))) {
                         Text("🔊", fontSize = 18.sp)
                     }
+                }
+                if (vm.lastProvider.isNotEmpty() && vm.lastProvider != "erro") {
+                    TextButton(onClick = { vm.history.firstOrNull()?.let(onEdit) }) { Text("✎ Corrigir esta tradução", color = Cyan, fontSize = 13.sp) }
                 }
                 if (vm.lastProvider.isNotEmpty()) {
                     val voice = if (vm.offlineNow) "offline" else "online"
@@ -341,7 +381,7 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                 Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp))
                     .background(if (i == 0) Color(0xFF0B2A33) else Color(0xFF08172A))
                     .border(1.dp, if (i == 0) Green.copy(alpha = .6f) else Color(0xFF17304A), RoundedCornerShape(12.dp))
-                    .clickable { vm.replayEntry(e) }
+                    .combinedClickable(onClick = { vm.replayEntry(e) }, onLongClick = { onEdit(e) })
                     .padding(12.dp)
             ) {
                 Text("${e.from.flag} ${e.original}", color = Color(0xFFC8D9EE), fontSize = 13.sp)
@@ -353,7 +393,7 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
         item {
             Text(
                 "Microfone ativo somente enquanto a sessão está iniciada (indicador verde). A conversa não é gravada; " +
-                    "o histórico só é salvo se você autorizar nas configurações. Toque num item do histórico para ouvir de novo.",
+                    "o histórico só é salvo se você autorizar nas configurações. Toque num item do histórico para ouvir de novo; segure para corrigir e ensinar o app.",
                 color = Color(0xFF809AB6), fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.padding(vertical = 16.dp)
             )
         }
@@ -541,6 +581,82 @@ private fun ModeBanner(color: Color, title: String, line: String, action: String
         }
         Button(onClick = onAction, colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Bg)) { Text(action) }
     }
+}
+
+@Composable
+private fun ToolsRow(vm: MainViewModel, openCamera: () -> Unit, onExport: (Boolean) -> Unit) {
+    val s = vm.settings
+    var glossMenu by remember { mutableStateOf(false) }
+    var exportMenu by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        ToolChip("📷 Câmera", Modifier.weight(1f)) { openCamera() }
+        Box(Modifier.weight(1.3f)) {
+            ToolChip("📘 " + (if (s.technicalMode) s.activeGlossary else "sem glossário") + " ▾", Modifier.fillMaxWidth(), active = s.technicalMode) { glossMenu = true }
+            DropdownMenu(expanded = glossMenu, onDismissRequest = { glossMenu = false }) {
+                s.glossaries.keys.forEach { n ->
+                    DropdownMenuItem(text = { Text((if (n == s.activeGlossary && s.technicalMode) "✓ " else "") + n) }, onClick = { glossMenu = false; vm.selectGlossary(n) })
+                }
+                DropdownMenuItem(text = { Text("Sem glossário") }, onClick = { glossMenu = false; vm.update { it.copy(technicalMode = false) } })
+            }
+        }
+        Box(Modifier.weight(1f)) {
+            ToolChip("📄 Ata ▾", Modifier.fillMaxWidth()) { exportMenu = true }
+            DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }) {
+                DropdownMenuItem(text = { Text("Excel (.xlsx)") }, onClick = { exportMenu = false; onExport(false) })
+                DropdownMenuItem(text = { Text("Word (.docx)") }, onClick = { exportMenu = false; onExport(true) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolChip(label: String, modifier: Modifier, active: Boolean = false, onClick: () -> Unit) {
+    Box(
+        modifier.clip(RoundedCornerShape(12.dp)).background(if (active) Cyan.copy(alpha = .12f) else Color(0xFF0A1A2E))
+            .border(1.dp, if (active) Cyan else Color(0xFF15578A), RoundedCornerShape(12.dp))
+            .clickable { onClick() }.padding(vertical = 10.dp, horizontal = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, color = White, fontSize = 13.sp, maxLines = 1) }
+}
+
+@Composable
+private fun CorrectionDialog(vm: MainViewModel, e: com.voxlink.ai.model.Entry, close: () -> Unit) {
+    var fixed by remember(e.id) { mutableStateOf(e.translation) }
+    val shortSentence = e.original.length <= 24
+    var termFrom by remember(e.id) { mutableStateOf("") }
+    var termTo by remember(e.id) { mutableStateOf("") }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = close,
+        title = { Text("Corrigir e ensinar") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("${e.from.flag} ${e.original}", fontSize = 14.sp)
+                PinyinLine(e.original, vm.settings.showPinyin, small = true, known = e.originalPinyin)
+                OutlinedTextField(
+                    value = fixed, onValueChange = { fixed = it },
+                    label = { Text("Tradução correta (${e.to.label})") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                PinyinLine(fixed, vm.settings.showPinyin, small = true)
+                Text(
+                    "Ensinar um termo técnico (opcional) → glossário \"${vm.settings.activeGlossary}\"",
+                    fontSize = 12.sp, color = Muted, modifier = Modifier.padding(top = 12.dp),
+                )
+                OutlinedTextField(
+                    value = termFrom, onValueChange = { termFrom = it }, singleLine = true,
+                    label = { Text("Termo em ${e.from.label}") }, modifier = Modifier.fillMaxWidth(),
+                    placeholder = { if (shortSentence) Text(e.original) },
+                )
+                OutlinedTextField(
+                    value = termTo, onValueChange = { termTo = it }, singleLine = true,
+                    label = { Text("Termo correto em ${e.to.label}") }, modifier = Modifier.fillMaxWidth(),
+                )
+                if (shortSentence) TextButton(onClick = { termFrom = e.original; termTo = fixed }) { Text("Usar a frase inteira como termo") }
+            }
+        },
+        confirmButton = { Button(onClick = { vm.correctEntry(e, fixed, termFrom, termTo); close() }) { Text("Salvar") } },
+        dismissButton = { TextButton(onClick = close) { Text("Cancelar") } },
+    )
 }
 
 @Composable
@@ -757,12 +873,13 @@ private fun Steps(vararg steps: String) {
 private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
     val ctx = LocalContext.current
     val s = vm.settings
-    var glossaryText by remember { mutableStateOf(s.glossary) }
+    var glossaryArea by remember { mutableStateOf(s.activeGlossary) }
+    var glossaryText by remember(glossaryArea) { mutableStateOf(s.glossaries[glossaryArea] ?: "") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Configurações", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = White, modifier = Modifier.weight(1f))
             Button(onClick = {
-                vm.update { it.copy(glossary = glossaryText) }
+                vm.saveGlossaryText(glossaryArea, glossaryText)
                 close()
             }) { Text("Concluir") }
         }
@@ -835,16 +952,53 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
         }
         Hint("Online: tradução + pinyin do Google (grátis). Offline: ML Kit no aparelho (grátis).")
 
-        Section("Modo técnico industrial")
-        SwitchRow("Usar glossário técnico (${vm.glossarySize} termos)", s.technicalMode) { v -> vm.update { it.copy(technicalMode = v) } }
+        Section("Glossários por área (modo técnico)")
+        SwitchRow("Usar glossário técnico (${vm.glossarySize} termos em \"${s.activeGlossary}\")", s.technicalMode) { v -> vm.update { it.copy(technicalMode = v) } }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 4.dp)) {
+            s.glossaries.keys.forEach { name ->
+                val sel = name == glossaryArea
+                Box(
+                    Modifier.padding(end = 6.dp).clip(RoundedCornerShape(14.dp))
+                        .background(if (sel) Cyan.copy(alpha = .18f) else Color.Transparent)
+                        .border(1.dp, if (sel) Cyan else Line, RoundedCornerShape(14.dp))
+                        .clickable {
+                            vm.saveGlossaryText(glossaryArea, glossaryText)
+                            glossaryArea = name
+                        }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) { Text((if (name == s.activeGlossary) "✓ " else "") + name, color = if (sel) Cyan else White, fontSize = 13.sp) }
+            }
+        }
         OutlinedTextField(
             value = glossaryText, onValueChange = { glossaryText = it },
-            label = { Text("português | english | 中文 (um termo por linha)") },
+            label = { Text("$glossaryArea — português | english | 中文 (um termo por linha)") },
             modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp), textStyle = MaterialTheme.typography.bodySmall,
         )
-        Button(onClick = { vm.update { it.copy(glossary = glossaryText) }; vm.toast = "Glossário salvo" }, modifier = Modifier.padding(top = 6.dp)) {
-            Text("Salvar glossário")
+        Row(Modifier.padding(top = 6.dp)) {
+            Button(onClick = { vm.saveGlossaryText(glossaryArea, glossaryText); vm.selectGlossary(glossaryArea) }) { Text("Salvar e usar") }
+            Spacer(Modifier.width(8.dp))
+            if (s.glossaries.size > 1) OutlinedButton(onClick = {
+                vm.deleteGlossaryArea(glossaryArea)
+                glossaryArea = vm.settings.activeGlossary
+            }) { Text("Apagar área", color = Color(0xFFFF7A7A)) }
         }
+        var newArea by remember { mutableStateOf("") }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+            OutlinedTextField(value = newArea, onValueChange = { newArea = it }, singleLine = true,
+                label = { Text("Nova área (ex.: SMT, Logística)") }, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = {
+                if (newArea.isNotBlank()) {
+                    vm.saveGlossaryText(glossaryArea, glossaryText)
+                    vm.addGlossaryArea(newArea)
+                    glossaryArea = newArea.trim()
+                    newArea = ""
+                }
+            }) { Text("Criar") }
+        }
+        Hint("Dica: corrija traduções segurando um item do histórico — o termo entra sozinho no glossário em uso. Termos com mais palavras são aplicados primeiro.")
+        Text("Frases corrigidas lembradas: ${vm.memoryCount}", color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+        if (vm.memoryCount > 0) TextButton(onClick = { vm.clearMemory() }) { Text("Apagar memória de correções", color = Color(0xFFFF7A7A)) }
 
         Section("Frases rápidas")
         var phrasesText by remember { mutableStateOf(s.quickPhrases) }

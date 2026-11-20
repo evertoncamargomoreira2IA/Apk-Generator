@@ -12,8 +12,8 @@ android {
         applicationId = "com.voxlink.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.5.0"
+        versionCode = 7
+        versionName = "1.6.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
@@ -44,6 +44,12 @@ dependencies {
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
     implementation("com.belerweb:pinyin4j:2.5.1")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("androidx.camera:camera-core:1.4.0")
+    implementation("androidx.camera:camera-camera2:1.4.0")
+    implementation("androidx.camera:camera-lifecycle:1.4.0")
+    implementation("androidx.camera:camera-view:1.4.0")
+    testImplementation("junit:junit:4.13.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 }

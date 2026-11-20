@@ -21,7 +21,7 @@ jobs:
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          gradle assembleDebug --stacktrace
+          gradle assembleDebug testDebugUnitTest --stacktrace
           cp app/build/outputs/apk/debug/app-debug.apk VoxLink-AI.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -39,10 +39,11 @@ jobs:
       - name: Save APK to apk-build branch
         run: |
           mkdir /tmp/out && cp VoxLink-AI.apk /tmp/out/
+          cp app/build/ata-test/* /tmp/out/ 2>/dev/null || true
           cd /tmp/out
           git init -q -b apk-build
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add VoxLink-AI.apk
+          git add -A
           git commit -qm "APK ${{ github.sha }}"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" apk-build

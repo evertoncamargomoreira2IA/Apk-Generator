@@ -15,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.voxlink.ai.data.Exporter
 import com.voxlink.ai.data.Net
 import com.voxlink.ai.data.SettingsStore
 import com.voxlink.ai.model.AppSettings
@@ -449,7 +450,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         status = "Traduzindo ${src.flag} → ${tgt.flag}…"
         val prepared = if (s.technicalMode) glossary.apply(text, src, tgt) else text
         val t0 = System.currentTimeMillis()
-        val result = translate(prepared, src, tgt)
+        val result = store.memoryLookup(text, src, tgt)?.let { TrResult(it, "Memória ✎") } ?: translate(prepared, src, tgt)
         translating = false
         liveTranslation = ""
         val ms = System.currentTimeMillis() - (if (flushAt in 1..t0) flushAt else t0)
@@ -513,6 +514,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
      */
     private suspend fun translate(text: String, from: Lang, to: Lang): TrResult? = coroutineScope {
         if (from == to) return@coroutineScope TrResult(text, "—")
+        // Sentences corrected by the user are reused exactly (translation memory).
+        store.memoryLookup(text, from, to)?.let { return@coroutineScope TrResult(it, "Memória ✎") }
         val localReady = offline.isReady(from, to)
         val useOnline = !offlineNow && settings.translationMode == TranslationMode.ONLINE_THEN_OFFLINE
         val onlineJob = if (useOnline) async {
@@ -653,6 +656,133 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         flushAt = System.currentTimeMillis()
         viewModelScope.launch { processLock.withLock { process(t, from, typed = true) } }
     }
+
+    // ================= Teach the app: corrections =================
+
+    /** Number of corrected sentences remembered. */
+    var memoryCount by mutableStateOf(store.memorySize()); private set
+
+    /**
+     * The user fixed a translation: update the history, remember the whole sentence for next time
+     * and (optionally) add the technical term to the active glossary.
+     */
+    fun correctEntry(e: Entry, corrected: String, termFrom: String, termTo: String) {
+        val fixed = corrected.trim()
+        if (fixed.isNotEmpty() && fixed != e.translation) {
+            store.memorySave(e.original, e.from, e.to, fixed)
+            memoryCount = store.memorySize()
+            val py = if (e.to == Lang.ZH) Pinyin.of(fixed) else null
+            val idx = history.indexOfFirst { it.id == e.id }
+            val updated = e.copy(translation = fixed, translationPinyin = py, provider = "Corrigido ✎")
+            if (idx >= 0) history[idx] = updated
+            if (lastOriginal == e.original) {
+                lastTranslation = fixed
+                lastTranslationPinyin = py
+                lastProvider = "Corrigido ✎"
+            }
+            if (settings.saveHistory) store.saveHistory(history)
+            if (syncConnected) {
+                sync.send(
+                    JSONObject().put("t", "seg").put("id", System.currentTimeMillis())
+                        .put("text", e.original).put("from", e.from.code)
+                        .put("translation", fixed).put("to", e.to.code)
+                        .put("op", e.originalPinyin ?: "").put("tp", py ?: "")
+                )
+            }
+        }
+        if (termFrom.isNotBlank() && termTo.isNotBlank()) addGlossaryTerm(e.from, termFrom.trim(), e.to, termTo.trim())
+        toast = when {
+            termFrom.isNotBlank() && termTo.isNotBlank() -> "Aprendido ✓ frase + termo no glossário \"${settings.activeGlossary}\""
+            fixed != e.translation -> "Aprendido ✓ — esta frase será traduzida assim da próxima vez"
+            else -> "Nada alterado"
+        }
+    }
+
+    /** Adds "pt | en | zh" line with the two known languages to the active glossary. */
+    fun addGlossaryTerm(a: Lang, termA: String, b: Lang, termB: String) {
+        val cols = Lang.entries.map { l -> when (l) { a -> termA; b -> termB; else -> "" } }
+        val line = cols.joinToString(" | ")
+        val name = settings.activeGlossary
+        update { st ->
+            val cur = st.glossaries[name] ?: ""
+            st.copy(glossaries = st.glossaries + (name to (cur.trimEnd() + "\n" + line + "\n")))
+        }
+    }
+
+    fun clearMemory() {
+        store.memoryClear()
+        memoryCount = 0
+        toast = "Memória de correções apagada"
+    }
+
+    // ================= Glossaries by area =================
+
+    fun selectGlossary(name: String) {
+        if (name !in settings.glossaries) return
+        update { it.copy(activeGlossary = name, technicalMode = true) }
+        toast = "Glossário: $name (${glossary.size} termos)"
+    }
+
+    fun saveGlossaryText(name: String, text: String) = update { it.copy(glossaries = it.glossaries + (name to text)) }
+
+    fun addGlossaryArea(name: String) {
+        val n = name.trim()
+        if (n.isEmpty() || n in settings.glossaries) return
+        update { it.copy(glossaries = it.glossaries + (n to "# $n · formato: português | english | 中文\n"), activeGlossary = n) }
+    }
+
+    fun deleteGlossaryArea(name: String) {
+        if (settings.glossaries.size <= 1) return
+        update { st ->
+            val m = st.glossaries - name
+            st.copy(glossaries = m, activeGlossary = if (st.activeGlossary == name) m.keys.first() else st.activeGlossary)
+        }
+    }
+
+    // ================= Meeting minutes =================
+
+    /** Writes the conversation as .xlsx or .docx in the cache and returns the file (to share). */
+    fun exportMinutes(word: Boolean): java.io.File? {
+        if (history.isEmpty()) {
+            toast = "Ainda não há conversa para exportar."
+            return null
+        }
+        return runCatching {
+            val dir = java.io.File(ctx.cacheDir, "exports").apply { mkdirs() }
+            dir.listFiles()?.forEach { it.delete() }
+            val f = java.io.File(dir, Exporter.fileName(if (word) "docx" else "xlsx"))
+            val who = buildString {
+                append(sync.myName).append(" (").append(settings.me.label).append(")")
+                append(" · ").append(partnerName ?: "Interlocutor").append(" (").append((partnerLang ?: settings.other).label).append(")")
+            }
+            val meta = Exporter.Meta("Ata de conversa — VoxLink AI", who, settings.activeGlossary)
+            val list = history.reversed()
+            if (word) Exporter.writeDocx(f, meta, list) else Exporter.writeXlsx(f, meta, list)
+            f
+        }.onFailure { toast = "Falha ao gerar a ata: ${it.message}" }.getOrNull()
+    }
+
+    // ================= Camera (signs, labels, screens) =================
+
+    data class OcrItem(val original: String, val from: Lang, val translation: String, val to: Lang, val originalPinyin: String?, val translationPinyin: String?)
+
+    /** Translates one block of text read by the camera into my language (or into the other, if it is already mine). */
+    suspend fun translateForCamera(text: String): OcrItem? {
+        val t = text.replace('\n', ' ').trim()
+        if (t.isEmpty()) return null
+        val s = settings
+        val src = if (Pinyin.hasHan(t)) Lang.ZH else detector.detect(t, if (s.me == Lang.ZH) Lang.EN else s.me, null, setOf(s.me, s.other, Lang.EN))
+        val tgt = if (src == s.me) s.other else s.me
+        val prepared = if (s.technicalMode) glossary.apply(t, src, tgt) else t
+        val r = store.memoryLookup(t, src, tgt)?.let { TrResult(it, "Memória ✎") } ?: translate(prepared, src, tgt) ?: return null
+        return OcrItem(
+            t, src, r.text, tgt,
+            if (src == Lang.ZH) (r.sourceRoman?.takeIf { prepared == t } ?: Pinyin.of(t)) else null,
+            if (tgt == Lang.ZH) (r.targetRoman ?: Pinyin.of(r.text)) else null,
+        )
+    }
+
+    fun speakText(text: String, lang: Lang) = enqueueSpeech(text, lang, force = true)
 
     fun testVoice(lang: Lang) = enqueueSpeech(SAMPLE_PHRASES.getValue(lang), lang, force = true)
 

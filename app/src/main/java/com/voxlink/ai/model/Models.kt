@@ -64,7 +64,9 @@ data class AppSettings(
     val androidVoices: Map<String, String> = emptyMap(),
     val translationMode: TranslationMode = TranslationMode.ONLINE_THEN_OFFLINE,
     val technicalMode: Boolean = true,
-    val glossary: String = DEFAULT_GLOSSARY,
+    /** Glossaries by area (name → "pt | en | zh" lines); the active one is applied in technical mode. */
+    val glossaries: Map<String, String> = DEFAULT_GLOSSARIES,
+    val activeGlossary: String = "Geral",
     val saveHistory: Boolean = false,
     val keepScreenOn: Boolean = true,
     /** Force offline mode (also automatic when there is no internet). */
@@ -86,7 +88,10 @@ data class AppSettings(
     val quickPhrases: String = DEFAULT_QUICK_PHRASES,
     /** With headphones connected: my language → headphones, the other person's language → loudspeaker. */
     val splitAudio: Boolean = true,
-)
+) {
+    /** Text of the active glossary. */
+    val glossary: String get() = glossaries[activeGlossary] ?: glossaries.values.firstOrNull() ?: ""
+}
 
 val SAMPLE_PHRASES = mapOf(
     Lang.PT to "A instalação do equipamento foi concluída. Começamos os testes amanhã.",
@@ -123,3 +128,70 @@ primeira peça | first article | 首件
 inspeção | inspection | 检验
 balanceamento de linha | line balancing | 产线平衡
 """
+
+const val GLOSSARY_LEO = """# LEO — impressoras · formato: português | english | 中文
+cabeçote de impressão | printhead | 打印头
+cartucho de tinta | ink cartridge | 墨盒
+bandeja de papel | paper tray | 纸盒
+alimentação de papel | paper feed | 进纸
+atolamento de papel | paper jam | 卡纸
+carro de impressão | carriage | 字车
+placa principal | main board | 主板
+cabo flat | flat cable | 排线
+correia | belt | 皮带
+parafuso | screw | 螺丝
+teste de impressão | print test | 打印测试
+etiqueta | label | 标签
+embalagem | packing | 包装
+posto de trabalho | workstation | 工位
+tempo de ciclo | cycle time | 周期时间
+"""
+
+const val GLOSSARY_INKJET = """# Inkjet · formato: português | english | 中文
+tinta | ink | 墨水
+bico injetor | nozzle | 喷嘴
+cabeçote de impressão | printhead | 打印头
+limpeza do cabeçote | head cleaning | 清洗打印头
+alinhamento do cabeçote | printhead alignment | 打印头校准
+cartucho de tinta | ink cartridge | 墨盒
+atolamento de papel | paper jam | 卡纸
+teste de impressão | print test | 打印测试
+"""
+
+const val GLOSSARY_QUALIDADE = """# Qualidade · formato: português | english | 中文
+não conformidade | nonconformity | 不合格
+inspeção de entrada | incoming inspection | 来料检验
+inspeção final | final inspection | 终检
+amostragem | sampling | 抽样
+defeito | defect | 不良
+taxa de defeitos | defect rate | 不良率
+rendimento | yield | 良率
+ação corretiva | corrective action | 纠正措施
+análise de causa raiz | root cause analysis | 根本原因分析
+segregação | quarantine | 隔离
+auditoria | audit | 审核
+primeira peça | first article | 首件
+"""
+
+const val GLOSSARY_MANUTENCAO = """# Manutenção · formato: português | english | 中文
+manutenção preventiva | preventive maintenance | 预防性维护
+manutenção corretiva | corrective maintenance | 故障维修
+parada de máquina | machine downtime | 停机
+peça de reposição | spare part | 备件
+lubrificação | lubrication | 润滑
+sensor | sensor | 传感器
+cilindro pneumático | pneumatic cylinder | 气缸
+válvula solenoide | solenoid valve | 电磁阀
+painel elétrico | electrical cabinet | 电柜
+aterramento | grounding | 接地
+calibração | calibration | 校准
+torque | torque | 扭力
+"""
+
+val DEFAULT_GLOSSARIES: Map<String, String> = linkedMapOf(
+    "Geral" to DEFAULT_GLOSSARY,
+    "LEO" to GLOSSARY_LEO,
+    "Inkjet" to GLOSSARY_INKJET,
+    "Qualidade" to GLOSSARY_QUALIDADE,
+    "Manutenção" to GLOSSARY_MANUTENCAO,
+)
