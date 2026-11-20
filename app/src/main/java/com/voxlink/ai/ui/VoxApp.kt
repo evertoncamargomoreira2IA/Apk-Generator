@@ -217,7 +217,7 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     }
                     vm.lastOriginal.isNotEmpty() -> {
                         Text(vm.lastOriginal, color = Color(0xFFC8D9EE), fontSize = 18.sp, lineHeight = 25.sp)
-                        PinyinLine(vm.lastOriginal, s.showPinyin)
+                        PinyinLine(vm.lastOriginal, s.showPinyin, known = vm.lastOriginalPinyin)
                     }
                     else -> Text("Toque no microfone e comece a falar…", color = Color(0xFF718BA8), fontSize = 16.sp)
                 }
@@ -237,7 +237,7 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                         } else {
                             Column {
                                 Text(vm.lastTranslation, color = White, fontSize = 27.sp, lineHeight = 36.sp, fontWeight = FontWeight.Medium)
-                                PinyinLine(vm.lastTranslation, s.showPinyin, big = true)
+                                PinyinLine(vm.lastTranslation, s.showPinyin, big = true, known = vm.lastTranslationPinyin)
                             }
                         }
                     }
@@ -312,9 +312,9 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     .padding(12.dp)
             ) {
                 Text("${e.from.flag} ${e.original}", color = Color(0xFFC8D9EE), fontSize = 13.sp)
-                PinyinLine(e.original, s.showPinyin, small = true)
+                PinyinLine(e.original, s.showPinyin, small = true, known = e.originalPinyin)
                 Text("${e.to.flag} ${e.translation}", color = Green, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp))
-                PinyinLine(e.translation, s.showPinyin, small = true)
+                PinyinLine(e.translation, s.showPinyin, small = true, known = e.translationPinyin)
             }
         }
         item {
@@ -400,9 +400,9 @@ private fun Waveform(active: Boolean, level: Float, speaking: Boolean) {
 }
 
 @Composable
-private fun PinyinLine(text: String, enabled: Boolean, big: Boolean = false, small: Boolean = false) {
+private fun PinyinLine(text: String, enabled: Boolean, big: Boolean = false, small: Boolean = false, known: String? = null) {
     if (!enabled) return
-    val py = remember(text) { Pinyin.of(text) } ?: return
+    val py = known ?: remember(text) { Pinyin.of(text) } ?: return
     Text(
         py,
         color = Color(0xFFFFC870),
@@ -421,6 +421,11 @@ private fun PinyinLine(text: String, enabled: Boolean, big: Boolean = false, sma
 @Composable
 private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> Unit) {
     val s = vm.settings
+    fun pinyinFor(l: Lang): String? = when {
+        vm.lastTo == l -> vm.lastTranslationPinyin
+        vm.lastFrom == l -> vm.lastOriginalPinyin
+        else -> null
+    }
     fun textFor(l: Lang): String = when {
         vm.lastTo == l -> vm.lastTranslation
         vm.lastFrom == l -> vm.lastOriginal
@@ -429,7 +434,7 @@ private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> 
     val live = listOf(vm.pendingText, vm.partial).filter { it.isNotBlank() }.joinToString(" ")
     Column(Modifier.fillMaxSize()) {
         FacePanel(
-            lang = s.other, text = textFor(s.other), live = if (vm.lastFrom == s.other || vm.listenLang == s.other) live else "",
+            lang = s.other, text = textFor(s.other), pinyin = pinyinFor(s.other), live = if (vm.lastFrom == s.other || vm.listenLang == s.other) live else "",
             active = !vm.autoDetect && vm.listenLang == s.other && vm.listening, showPinyin = s.showPinyin,
             modifier = Modifier.weight(1f).rotate(180f),
         ) { if (!vm.autoDetect) vm.listenFor(s.other) }
@@ -450,7 +455,7 @@ private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> 
         Text(vm.status, color = if (vm.listening || vm.speaking) Green else Muted, fontSize = 12.sp,
             textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
         FacePanel(
-            lang = s.me, text = textFor(s.me), live = if (vm.lastFrom == s.me || vm.listenLang == s.me) live else "",
+            lang = s.me, text = textFor(s.me), pinyin = pinyinFor(s.me), live = if (vm.lastFrom == s.me || vm.listenLang == s.me) live else "",
             active = !vm.autoDetect && vm.listenLang == s.me && vm.listening, showPinyin = s.showPinyin,
             modifier = Modifier.weight(1f),
         ) { if (!vm.autoDetect) vm.listenFor(s.me) }
@@ -459,7 +464,7 @@ private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> 
 
 @Composable
 private fun FacePanel(
-    lang: Lang, text: String, live: String, active: Boolean, showPinyin: Boolean,
+    lang: Lang, text: String, pinyin: String?, live: String, active: Boolean, showPinyin: Boolean,
     modifier: Modifier, onTap: () -> Unit,
 ) {
     Column(
@@ -476,7 +481,7 @@ private fun FacePanel(
             Text(live, color = Muted, fontSize = 20.sp, fontStyle = FontStyle.Italic)
         } else if (text.isNotBlank()) {
             Text(text, color = White, fontSize = 30.sp, lineHeight = 40.sp, fontWeight = FontWeight.Medium)
-            PinyinLine(text, showPinyin, big = true)
+            PinyinLine(text, showPinyin, big = true, known = pinyin)
         } else {
             Text(SAMPLE_HINT.getValue(lang), color = Color(0xFF718BA8), fontSize = 18.sp)
         }

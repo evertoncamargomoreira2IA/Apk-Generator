@@ -46,6 +46,8 @@ data class Entry(
     val to: Lang,
     val time: Long,
     val provider: String,
+    val originalPinyin: String? = null,
+    val translationPinyin: String? = null,
 )
 
 enum class VoiceProvider { ANDROID, AZURE }

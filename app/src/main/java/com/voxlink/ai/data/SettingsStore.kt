@@ -77,6 +77,7 @@ class SettingsStore(context: Context) {
                 JSONObject()
                     .put("id", e.id).put("o", e.original).put("f", e.from.code)
                     .put("t", e.translation).put("to", e.to.code).put("ts", e.time).put("p", e.provider)
+                    .put("op", e.originalPinyin ?: "").put("tp", e.translationPinyin ?: "")
             )
         }
         p.edit().putString("history", arr.toString()).apply()
@@ -92,6 +93,8 @@ class SettingsStore(context: Context) {
                 translation = o.getString("t"),
                 to = Lang.fromCode(o.getString("to")) ?: return@mapNotNull null,
                 time = o.getLong("ts"), provider = o.optString("p", ""),
+                originalPinyin = o.optString("op", "").ifBlank { null },
+                translationPinyin = o.optString("tp", "").ifBlank { null },
             )
         }
     }.getOrDefault(emptyList())

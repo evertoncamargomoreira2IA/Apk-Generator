@@ -64,6 +64,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     var lastOriginal by mutableStateOf(""); private set
     var lastFrom by mutableStateOf<Lang?>(null); private set
     var lastTranslation by mutableStateOf(""); private set
+    var lastOriginalPinyin by mutableStateOf<String?>(null); private set
+    var lastTranslationPinyin by mutableStateOf<String?>(null); private set
     var lastTo by mutableStateOf<Lang?>(null); private set
     var lastProvider by mutableStateOf(""); private set
     var translating by mutableStateOf(false); private set
@@ -332,6 +334,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         }
         lastOriginal = text
         lastFrom = src
+        lastOriginalPinyin = null
 
         translating = true
         status = "Traduzindo ${src.flag} → ${tgt.flag}…"
@@ -346,11 +349,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
             status = "Falha na tradução"
             return
         }
-        val (out, provider) = result
+        val out = result.text
+        val provider = result.provider
+        val srcPy = if (src == Lang.ZH) (result.sourceRoman?.takeIf { prepared == text } ?: Pinyin.of(text)) else null
+        val dstPy = if (tgt == Lang.ZH) (result.targetRoman ?: Pinyin.of(out)) else null
         lastTranslation = out
+        lastTranslationPinyin = dstPy
+        lastOriginalPinyin = srcPy
         lastTo = tgt
         lastProvider = provider
-        history.add(0, Entry(now, text, src, out, tgt, now, provider))
+        history.add(0, Entry(now, text, src, out, tgt, now, provider, srcPy, dstPy))
         if (history.size > 300) history.removeRange(300, history.size)
         if (s.saveHistory) store.saveHistory(history)
 
@@ -369,17 +377,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         }
     }
 
-    private suspend fun translate(text: String, from: Lang, to: Lang): Pair<String, String>? {
-        if (from == to) return text to "—"
+    private data class TrResult(val text: String, val provider: String, val sourceRoman: String? = null, val targetRoman: String? = null)
+
+    private suspend fun translate(text: String, from: Lang, to: Lang): TrResult? {
+        if (from == to) return TrResult(text, "—")
         if (settings.translationMode == TranslationMode.ONLINE_THEN_OFFLINE && Net.online(ctx)) {
             try {
-                return withTimeout(9000) { online.translate(text, from, to) } to "Online"
+                val t = withTimeout(9000) { online.translateFull(text, from, to) }
+                return TrResult(t.text, "Online", t.sourceRoman, t.targetRoman)
             } catch (e: Exception) {
                 if (e is CancellationException && e !is TimeoutCancellationException) throw e
             }
         }
         return try {
-            withTimeout(90_000) { offline.translate(text, from, to) } to "Offline"
+            TrResult(withTimeout(90_000) { offline.translate(text, from, to) }, "Offline")
         } catch (e: Exception) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
             null

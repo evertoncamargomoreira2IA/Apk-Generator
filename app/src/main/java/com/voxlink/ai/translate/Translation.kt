@@ -23,13 +23,18 @@ interface TranslationProvider {
     suspend fun translate(text: String, from: Lang, to: Lang): String
 }
 
-/** Online neural translation (Google web endpoint, no key). Best quality for conversation. */
+/** Translation plus romanisation (pinyin) of source and target, when available. */
+data class Translated(val text: String, val sourceRoman: String? = null, val targetRoman: String? = null)
+
+/** Online neural translation (Google web endpoint, no key). Best quality for conversation + pinyin. */
 class OnlineTranslator : TranslationProvider {
     override val name = "Online"
 
-    override suspend fun translate(text: String, from: Lang, to: Lang): String = withContext(Dispatchers.IO) {
+    override suspend fun translate(text: String, from: Lang, to: Lang): String = translateFull(text, from, to).text
+
+    suspend fun translateFull(text: String, from: Lang, to: Lang): Translated = withContext(Dispatchers.IO) {
         val url = URL(
-            "https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from.webCode}&tl=${to.webCode}&dt=t&q=" +
+            "https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from.webCode}&tl=${to.webCode}&dt=t&dt=rm&q=" +
                 URLEncoder.encode(text, "UTF-8")
         )
         val c = url.openConnection() as HttpURLConnection
@@ -40,18 +45,35 @@ class OnlineTranslator : TranslationProvider {
             if (c.responseCode != 200) throw IOException("HTTP ${c.responseCode}")
             val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             val parts = JSONArray(body).getJSONArray(0)
-            val out = buildString {
-                for (i in 0 until parts.length()) {
-                    val p = parts.optJSONArray(i) ?: continue
-                    if (!p.isNull(0)) append(p.optString(0, ""))
+            val out = StringBuilder()
+            var srcRoman: String? = null
+            var dstRoman: String? = null
+            for (i in 0 until parts.length()) {
+                val p = parts.optJSONArray(i) ?: continue
+                if (!p.isNull(0)) {
+                    out.append(p.optString(0, ""))
+                } else {
+                    // romanisation row: [null, null, targetRoman, sourceRoman]
+                    if (p.length() > 2 && !p.isNull(2)) dstRoman = p.optString(2).takeIf { it.isNotBlank() }
+                    if (p.length() > 3 && !p.isNull(3)) srcRoman = p.optString(3).takeIf { it.isNotBlank() }
                 }
-            }.trim()
-            if (out.isEmpty()) throw IOException("Resposta vazia")
-            out
+            }
+            val result = out.toString().trim()
+            if (result.isEmpty()) throw IOException("Resposta vazia")
+            Translated(
+                result,
+                sourceRoman = if (from == Lang.ZH) srcRoman else null,
+                targetRoman = if (to == Lang.ZH) dstRoman else null,
+            )
         } finally {
             c.disconnect()
         }
     }
+
+    /** Pinyin only (used for Chinese text that was not translated online). */
+    suspend fun pinyin(text: String): String? = runCatching {
+        translateFull(text, Lang.ZH, Lang.EN).sourceRoman
+    }.getOrNull()
 }
 
 /** On-device translation (Google ML Kit). Works offline after the language packs are downloaded. */
