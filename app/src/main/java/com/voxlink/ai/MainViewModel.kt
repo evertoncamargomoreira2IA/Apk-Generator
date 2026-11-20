@@ -210,8 +210,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         }
     }
 
-    fun setLectureSpeaker(l: Lang) = startLecture(l, if (l == lectureTarget) other(l) else lectureTarget)
-    fun setLectureTarget(l: Lang) = startLecture(if (l == lectureSpeaker) other(l) else lectureSpeaker, l)
+    fun chooseLectureSpeaker(l: Lang) = startLecture(l, if (l == lectureTarget) other(l) else lectureTarget)
+    fun chooseLectureTarget(l: Lang) = startLecture(if (l == lectureSpeaker) other(l) else lectureSpeaker, l)
     fun swapLecture() = startLecture(lectureTarget, lectureSpeaker)
 
     /** Leaves lecture mode. In "read at the end" mode, reads the whole translation now. */
@@ -293,7 +293,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     /** Choose which language is spoken next (chip tap / face-to-face half / offline direction). */
     fun listenFor(l: Lang) {
         if (lectureActive) {
-            setLectureSpeaker(l)
+            chooseLectureSpeaker(l)
             return
         }
         if (syncConnected && l != settings.me) {

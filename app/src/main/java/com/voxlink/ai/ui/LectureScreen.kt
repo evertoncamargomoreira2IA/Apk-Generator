@@ -79,11 +79,11 @@ fun LectureScreen(vm: MainViewModel, startMic: () -> Unit, onExport: (Boolean) -
         // Who speaks → translate to
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
             Text("Quem fala", color = LMuted, fontSize = 12.sp, modifier = Modifier.width(70.dp))
-            Lang.entries.forEach { l -> LangChip(l, vm.lectureSpeaker == l) { vm.setLectureSpeaker(l) } }
+            Lang.entries.forEach { l -> LangChip(l, vm.lectureSpeaker == l) { vm.chooseLectureSpeaker(l) } }
         }
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
             Text("Traduzir p/", color = LMuted, fontSize = 12.sp, modifier = Modifier.width(70.dp))
-            Lang.entries.forEach { l -> LangChip(l, vm.lectureTarget == l) { vm.setLectureTarget(l) } }
+            Lang.entries.forEach { l -> LangChip(l, vm.lectureTarget == l) { vm.chooseLectureTarget(l) } }
         }
 
         // Voice + pause
