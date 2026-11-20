@@ -49,6 +49,9 @@ data class Entry(
 )
 
 enum class VoiceProvider { ANDROID, AZURE }
+
+/** ANDROID = Google recognizer (turn-based language switching); AZURE = continuous automatic language identification. */
+enum class RecognitionEngine { ANDROID, AZURE }
 enum class TranslationMode { ONLINE_THEN_OFFLINE, OFFLINE_ONLY }
 
 data class AppSettings(
@@ -70,6 +73,10 @@ data class AppSettings(
     val glossary: String = DEFAULT_GLOSSARY,
     val saveHistory: Boolean = false,
     val keepScreenOn: Boolean = true,
+    val recognitionEngine: RecognitionEngine = RecognitionEngine.ANDROID,
+    val showPinyin: Boolean = true,
+    /** Silence (seconds) that marks the end of what a person is saying. */
+    val endPause: Float = 1.5f,
 )
 
 val SAMPLE_PHRASES = mapOf(

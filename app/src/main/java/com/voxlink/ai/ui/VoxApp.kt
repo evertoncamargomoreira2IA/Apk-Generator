@@ -60,6 +60,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -69,11 +70,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.voxlink.ai.MainViewModel
 import com.voxlink.ai.model.Lang
+import com.voxlink.ai.model.Pinyin
+import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.TranslationMode
 import com.voxlink.ai.model.VoiceProvider
 import kotlin.math.PI
@@ -95,6 +99,7 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit) {
     val ctx = LocalContext.current
     val view = LocalView.current
     var showSettings by remember { mutableStateOf(false) }
+    var faceToFace by remember { mutableStateOf(false) }
 
     SideEffect { view.keepScreenOn = vm.sessionActive && vm.settings.keepScreenOn }
     LaunchedEffect(vm.toast) {
@@ -113,18 +118,23 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit) {
                 .systemBarsPadding()
                 .imePadding()
         ) {
-            if (showSettings) {
-                BackHandler { showSettings = false }
-                SettingsScreen(vm) { showSettings = false }
-            } else {
-                MainScreen(vm, onMic) { showSettings = true }
+            when {
+                showSettings -> {
+                    BackHandler { showSettings = false }
+                    SettingsScreen(vm) { showSettings = false }
+                }
+                faceToFace -> {
+                    BackHandler { faceToFace = false }
+                    FaceToFaceScreen(vm, onMic) { faceToFace = false }
+                }
+                else -> MainScreen(vm, onMic, openSettings = { showSettings = true }, openFaceToFace = { faceToFace = true })
             }
         }
     }
 }
 
 @Composable
-private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit) {
+private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit) {
     val ctx = LocalContext.current
     val s = vm.settings
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -142,6 +152,8 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     }
                     Text("INTÉRPRETE DE VOZ AO VIVO", fontSize = 11.sp, color = Muted, letterSpacing = 1.sp)
                 }
+                OutlinedButton(onClick = openFaceToFace, border = BorderStroke(1.dp, Line)) { Text("⇅", fontSize = 20.sp, color = White) }
+                Spacer(Modifier.width(6.dp))
                 OutlinedButton(onClick = openSettings, border = BorderStroke(1.dp, Line)) { Text("⚙", fontSize = 20.sp, color = White) }
             }
         }
@@ -160,7 +172,12 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
             Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Ouvindo:", color = Muted, fontSize = 13.sp)
                 Spacer(Modifier.width(8.dp))
-                listOf(s.me, s.other).forEach { l ->
+                if (vm.autoDetect) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(14.dp)).background(Green.copy(alpha = .15f))
+                            .border(1.dp, Green, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) { Text("🌐 Idioma automático · PT · EN · 中文", color = Green, fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
+                } else listOf(s.me, s.other).forEach { l ->
                     val sel = vm.listenLang == l
                     Box(
                         Modifier.padding(end = 8.dp).clip(RoundedCornerShape(14.dp))
@@ -171,8 +188,10 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     ) { Text("${l.flag} ${l.short}", color = if (sel) Cyan else White, fontWeight = FontWeight.SemiBold) }
                 }
                 Spacer(Modifier.weight(1f))
-                Text("Auto", color = Muted, fontSize = 12.sp)
-                Switch(checked = s.autoSwitch, onCheckedChange = { v -> vm.update { it.copy(autoSwitch = v) } })
+                if (!vm.autoDetect) {
+                    Text("Alternar", color = Muted, fontSize = 12.sp)
+                    Switch(checked = s.autoSwitch, onCheckedChange = { v -> vm.update { it.copy(autoSwitch = v) } })
+                }
             }
         }
 
@@ -180,16 +199,26 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
 
         // Original speech
         item {
-            Card(border = Blue) {
+            val live = listOf(vm.pendingText, vm.partial).filter { it.isNotBlank() }.joinToString(" ")
+            Card(border = Blue, onClick = { vm.flushNow() }) {
                 val det = vm.lastFrom
                 Text(
-                    "◉ FALA ORIGINAL" + if (det != null && vm.partial.isEmpty()) " · ${det.flag} ${det.label} detectado" else "",
+                    "◉ FALA ORIGINAL" + if (det != null && live.isEmpty()) " · ${det.flag} ${det.label} detectado" else "",
                     color = Color(0xFF55D3FF), fontSize = 11.sp, letterSpacing = 1.sp
                 )
                 Spacer(Modifier.height(6.dp))
                 when {
-                    vm.partial.isNotEmpty() -> Text(vm.partial, color = Muted, fontSize = 18.sp, fontStyle = FontStyle.Italic)
-                    vm.lastOriginal.isNotEmpty() -> Text(vm.lastOriginal, color = Color(0xFFC8D9EE), fontSize = 18.sp, lineHeight = 25.sp)
+                    live.isNotEmpty() -> {
+                        Text(live, color = Color(0xFFB0C6DE), fontSize = 18.sp, lineHeight = 25.sp, fontStyle = FontStyle.Italic)
+                        PinyinLine(live, s.showPinyin)
+                        if (vm.pendingText.isNotBlank()) {
+                            Text("⏳ Aguardando terminar de falar… (toque aqui para traduzir já)", color = Cyan, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                        }
+                    }
+                    vm.lastOriginal.isNotEmpty() -> {
+                        Text(vm.lastOriginal, color = Color(0xFFC8D9EE), fontSize = 18.sp, lineHeight = 25.sp)
+                        PinyinLine(vm.lastOriginal, s.showPinyin)
+                    }
                     else -> Text("Toque no microfone e comece a falar…", color = Color(0xFF718BA8), fontSize = 16.sp)
                 }
             }
@@ -206,7 +235,10 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                         if (vm.lastTranslation.isEmpty()) {
                             Text(if (vm.translating) "Traduzindo…" else "A tradução aparece aqui…", color = Color(0xFF718BA8), fontSize = 16.sp)
                         } else {
-                            Text(vm.lastTranslation, color = White, fontSize = 27.sp, lineHeight = 36.sp, fontWeight = FontWeight.Medium)
+                            Column {
+                                Text(vm.lastTranslation, color = White, fontSize = 27.sp, lineHeight = 36.sp, fontWeight = FontWeight.Medium)
+                                PinyinLine(vm.lastTranslation, s.showPinyin, big = true)
+                            }
                         }
                     }
                     OutlinedButton(onClick = { vm.replay() }, shape = CircleShape, border = BorderStroke(1.dp, Color(0xFF177A63))) {
@@ -280,7 +312,9 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     .padding(12.dp)
             ) {
                 Text("${e.from.flag} ${e.original}", color = Color(0xFFC8D9EE), fontSize = 13.sp)
+                PinyinLine(e.original, s.showPinyin, small = true)
                 Text("${e.to.flag} ${e.translation}", color = Green, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp))
+                PinyinLine(e.translation, s.showPinyin, small = true)
             }
         }
         item {
@@ -294,9 +328,10 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
 }
 
 @Composable
-private fun Card(border: Color, content: @Composable () -> Unit) {
+private fun Card(border: Color, onClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
     Column(
         Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(20.dp))
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
             .background(Brush.linearGradient(listOf(Color(0xEE0D1D31), Color(0xFF061323))))
             .border(1.dp, border, RoundedCornerShape(20.dp))
             .heightIn(min = 90.dp)
@@ -364,6 +399,96 @@ private fun Waveform(active: Boolean, level: Float, speaking: Boolean) {
     }
 }
 
+@Composable
+private fun PinyinLine(text: String, enabled: Boolean, big: Boolean = false, small: Boolean = false) {
+    if (!enabled) return
+    val py = remember(text) { Pinyin.of(text) } ?: return
+    Text(
+        py,
+        color = Color(0xFFFFC870),
+        fontSize = if (big) 17.sp else if (small) 12.sp else 14.sp,
+        lineHeight = if (big) 23.sp else 18.sp,
+        fontStyle = FontStyle.Italic,
+        modifier = Modifier.padding(top = 3.dp),
+    )
+}
+
+/**
+ * Face-to-face mode: phone flat on the table between the two people. The top half is rotated
+ * for the person in front of you and always shows the text in THEIR language; the bottom half
+ * shows yours. In turn mode, each person taps their own half before speaking.
+ */
+@Composable
+private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> Unit) {
+    val s = vm.settings
+    fun textFor(l: Lang): String = when {
+        vm.lastTo == l -> vm.lastTranslation
+        vm.lastFrom == l -> vm.lastOriginal
+        else -> ""
+    }
+    val live = listOf(vm.pendingText, vm.partial).filter { it.isNotBlank() }.joinToString(" ")
+    Column(Modifier.fillMaxSize()) {
+        FacePanel(
+            lang = s.other, text = textFor(s.other), live = if (vm.lastFrom == s.other || vm.listenLang == s.other) live else "",
+            active = !vm.autoDetect && vm.listenLang == s.other && vm.listening, showPinyin = s.showPinyin,
+            modifier = Modifier.weight(1f).rotate(180f),
+        ) { if (!vm.autoDetect) vm.listenFor(s.other) }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            TextButton(onClick = close) { Text("✕ Sair", color = Muted) }
+            Box(
+                Modifier.size(64.dp).clip(CircleShape)
+                    .background(if (vm.sessionActive) Color(0xFF0B6B5A) else Color(0xFF0B3D74))
+                    .border(2.dp, if (vm.sessionActive) Green else Cyan, CircleShape)
+                    .clickable { onMic() },
+                contentAlignment = Alignment.Center,
+            ) { Text(if (vm.sessionActive) "■" else "🎙", fontSize = 24.sp, color = White) }
+            TextButton(onClick = { vm.replay() }) { Text("🔊 Repetir", color = Muted) }
+        }
+        Text(vm.status, color = if (vm.listening || vm.speaking) Green else Muted, fontSize = 12.sp,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+        FacePanel(
+            lang = s.me, text = textFor(s.me), live = if (vm.lastFrom == s.me || vm.listenLang == s.me) live else "",
+            active = !vm.autoDetect && vm.listenLang == s.me && vm.listening, showPinyin = s.showPinyin,
+            modifier = Modifier.weight(1f),
+        ) { if (!vm.autoDetect) vm.listenFor(s.me) }
+    }
+}
+
+@Composable
+private fun FacePanel(
+    lang: Lang, text: String, live: String, active: Boolean, showPinyin: Boolean,
+    modifier: Modifier, onTap: () -> Unit,
+) {
+    Column(
+        modifier.fillMaxWidth().padding(12.dp).clip(RoundedCornerShape(22.dp))
+            .background(Brush.linearGradient(listOf(Color(0xEE0D1D31), Color(0xFF061323))))
+            .border(if (active) 2.dp else 1.dp, if (active) Green else Line, RoundedCornerShape(22.dp))
+            .clickable { onTap() }
+            .verticalScroll(rememberScrollState())
+            .padding(18.dp),
+    ) {
+        Text("${lang.flag} ${lang.label}" + if (active) "  ● ouvindo" else "", color = if (active) Green else Cyan, fontSize = 13.sp)
+        Spacer(Modifier.height(8.dp))
+        if (live.isNotBlank()) {
+            Text(live, color = Muted, fontSize = 20.sp, fontStyle = FontStyle.Italic)
+        } else if (text.isNotBlank()) {
+            Text(text, color = White, fontSize = 30.sp, lineHeight = 40.sp, fontWeight = FontWeight.Medium)
+            PinyinLine(text, showPinyin, big = true)
+        } else {
+            Text(SAMPLE_HINT.getValue(lang), color = Color(0xFF718BA8), fontSize = 18.sp)
+        }
+    }
+}
+
+private val SAMPLE_HINT = mapOf(
+    Lang.PT to "Toque aqui e fale em português",
+    Lang.EN to "Tap here and speak English",
+    Lang.ZH to "点这里，然后说中文",
+)
+
 // ======================= Settings =======================
 
 @Composable
@@ -381,6 +506,36 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
                 vm.update { it.copy(glossary = glossaryText, azureKey = azureKey.trim(), azureRegion = azureRegion.trim()) }
                 close()
             }) { Text("Concluir") }
+        }
+
+        Section("Reconhecimento de fala")
+        RadioRow("Android/Google (grátis) — idioma por turnos", s.recognitionEngine == RecognitionEngine.ANDROID) {
+            vm.update { it.copy(recognitionEngine = RecognitionEngine.ANDROID) }
+        }
+        RadioRow("Azure — detecção automática do idioma", s.recognitionEngine == RecognitionEngine.AZURE) {
+            vm.update { it.copy(recognitionEngine = RecognitionEngine.AZURE) }
+        }
+        Hint(
+            if (s.recognitionEngine == RecognitionEngine.AZURE)
+                "Cada frase tem o idioma identificado sozinho (PT · EN · 中文), sem precisar tocar em nada. Usa a mesma chave Azure Speech da voz premium (abaixo)."
+            else
+                "O app ouve um idioma por vez e alterna após cada tradução. No Android 14+ também tenta detectar o idioma. Para detecção 100% automática, use o Azure."
+        )
+        LabeledSlider("Pausa para considerar que terminou de falar", s.endPause, 0.6f..3.0f, "%.1f s") { v -> vm.update { it.copy(endPause = v) } }
+        Hint("Aumente se o app estiver traduzindo antes de a pessoa terminar a frase.")
+        SwitchRow("Mostrar pinyin no texto em chinês", s.showPinyin) { v -> vm.update { it.copy(showPinyin = v) } }
+
+        if (s.recognitionEngine == RecognitionEngine.AZURE || s.voiceProvider == VoiceProvider.AZURE) {
+            Section("Chave Azure Speech")
+            OutlinedTextField(value = azureKey, onValueChange = { azureKey = it }, label = { Text("Chave Azure Speech") },
+                visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = azureRegion, onValueChange = { azureRegion = it }, label = { Text("Região (ex.: brazilsouth, eastus)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+            Button(onClick = {
+                vm.update { it.copy(azureKey = azureKey.trim(), azureRegion = azureRegion.trim()) }
+                vm.toast = "Chave salva"
+            }, modifier = Modifier.padding(top = 6.dp)) { Text("Salvar chave") }
+            Hint("portal.azure.com → criar recurso \"Speech\" (camada gratuita F0) → Chaves e Ponto de extremidade. A chave fica só neste aparelho.")
         }
 
         Section("Voz da tradução")
@@ -404,15 +559,10 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
             }
             Hint("Dica: no app \"Serviços de voz do Google\", baixe as vozes Português (Brasil) e Chinês (Mandarim). As vozes marcadas como \"online\" são as mais naturais.")
         } else {
-            OutlinedTextField(value = azureKey, onValueChange = { azureKey = it }, label = { Text("Chave Azure Speech") },
-                visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = azureRegion, onValueChange = { azureRegion = it }, label = { Text("Região (ex.: brazilsouth, eastus)") },
-                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
                 Text("Voz feminina", color = White, modifier = Modifier.weight(1f))
                 Switch(checked = s.azureFemale, onCheckedChange = { v -> vm.update { it.copy(azureFemale = v) } })
             }
-            Button(onClick = { vm.update { it.copy(azureKey = azureKey.trim(), azureRegion = azureRegion.trim()) } }) { Text("Salvar chave") }
             Hint("Vozes: Francisca/Antonio (PT-BR), Jenny/Guy (EN), Xiaoxiao/Yunxi (中文). A chave fica só neste aparelho. Se o Azure falhar, o app usa a voz do Android automaticamente.")
         }
 

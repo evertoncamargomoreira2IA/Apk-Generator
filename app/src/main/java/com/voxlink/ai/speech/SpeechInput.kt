@@ -9,11 +9,18 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import com.voxlink.ai.model.Lang
 
+/** Provider abstraction for speech recognition engines. */
+interface SpeechEngine {
+    fun start(lang: Lang, alternatives: List<Lang>)
+    fun cancel()
+    fun destroy()
+}
+
 /**
  * Streaming speech recognition (partial + final results) on top of Android's SpeechRecognizer.
  * One recognition = one utterance; the conversation manager restarts it for continuous listening.
  */
-class SpeechInput(private val ctx: Context, private val cb: Callbacks) {
+class SpeechInput(private val ctx: Context, private val cb: Callbacks) : SpeechEngine {
 
     interface Callbacks {
         fun onReady()
@@ -30,9 +37,12 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) {
     /** Advanced extras (Android 13/14 language detection, formatting). Disabled automatically if unsupported. */
     var advanced = true
 
+    /** Silence that ends an utterance, in ms (many recognizers treat this only as a hint). */
+    var silenceMs = 1500L
+
     val available: Boolean get() = SpeechRecognizer.isRecognitionAvailable(ctx)
 
-    fun start(lang: Lang, alternatives: List<Lang>) {
+    override fun start(lang: Lang, alternatives: List<Lang>) {
         if (rec == null) {
             rec = SpeechRecognizer.createSpeechRecognizer(ctx).also { it.setRecognitionListener(listener) }
         }
@@ -45,8 +55,8 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1100L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, silenceMs)
             putExtra("android.speech.extra.EXTRA_ADDITIONAL_LANGUAGES", all.drop(1).toTypedArray())
             if (advanced && Build.VERSION.SDK_INT >= 33) {
                 putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY)
@@ -61,9 +71,9 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) {
         rec?.startListening(i)
     }
 
-    fun cancel() { runCatching { rec?.cancel() } }
+    override fun cancel() { runCatching { rec?.cancel() } }
 
-    fun destroy() {
+    override fun destroy() {
         runCatching { rec?.destroy() }
         rec = null
     }
@@ -95,6 +105,9 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) {
     }
 
     companion object {
+        const val AZURE_ERROR = 100
+        const val AZURE_AUTH_ERROR = 101
+
         fun errorText(code: Int): String = when (code) {
             SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Erro de rede no reconhecimento"
             SpeechRecognizer.ERROR_AUDIO -> "Erro de áudio do microfone"
@@ -102,6 +115,8 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) {
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Sem permissão de microfone"
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Reconhecedor ocupado"
             12, 13 -> "Idioma não disponível no reconhecedor"
+            AZURE_AUTH_ERROR -> "Azure Speech: chave ou região inválida"
+            AZURE_ERROR -> "Azure Speech: erro de conexão"
             else -> "Erro de reconhecimento ($code)"
         }
     }

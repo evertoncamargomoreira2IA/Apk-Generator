@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import com.voxlink.ai.model.AppSettings
 import com.voxlink.ai.model.Entry
 import com.voxlink.ai.model.Lang
+import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.TranslationMode
 import com.voxlink.ai.model.VoiceProvider
 import org.json.JSONArray
@@ -37,6 +38,9 @@ class SettingsStore(context: Context) {
             glossary = p.getString("glossary", d.glossary) ?: d.glossary,
             saveHistory = p.getBoolean("saveHistory", d.saveHistory),
             keepScreenOn = p.getBoolean("keepScreenOn", d.keepScreenOn),
+            recognitionEngine = runCatching { RecognitionEngine.valueOf(p.getString("recognitionEngine", null)!!) }.getOrDefault(d.recognitionEngine),
+            showPinyin = p.getBoolean("showPinyin", d.showPinyin),
+            endPause = p.getFloat("endPause", d.endPause),
         )
     }
 
@@ -60,6 +64,9 @@ class SettingsStore(context: Context) {
             .putString("glossary", s.glossary)
             .putBoolean("saveHistory", s.saveHistory)
             .putBoolean("keepScreenOn", s.keepScreenOn)
+            .putString("recognitionEngine", s.recognitionEngine.name)
+            .putBoolean("showPinyin", s.showPinyin)
+            .putFloat("endPause", s.endPause)
             .apply()
     }
 

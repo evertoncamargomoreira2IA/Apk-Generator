@@ -15,10 +15,14 @@ import com.voxlink.ai.data.Net
 import com.voxlink.ai.data.SettingsStore
 import com.voxlink.ai.model.AppSettings
 import com.voxlink.ai.model.Entry
+import com.voxlink.ai.model.Pinyin
 import com.voxlink.ai.model.Lang
+import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.SAMPLE_PHRASES
 import com.voxlink.ai.model.TranslationMode
 import com.voxlink.ai.model.VoiceProvider
+import com.voxlink.ai.speech.AzureSpeechInput
+import com.voxlink.ai.speech.SpeechEngine
 import com.voxlink.ai.speech.SpeechInput
 import com.voxlink.ai.translate.Glossary
 import com.voxlink.ai.translate.LanguageDetector
@@ -54,6 +58,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     var listenLang by mutableStateOf(settings.me); private set
     var status by mutableStateOf("Pronto para ouvir"); private set
     var partial by mutableStateOf(""); private set
+    /** Sentences already recognised but waiting for the speaker to finish. */
+    var pendingText by mutableStateOf(""); private set
     var rms by mutableFloatStateOf(0f); private set
     var lastOriginal by mutableStateOf(""); private set
     var lastFrom by mutableStateOf<Lang?>(null); private set
@@ -70,6 +76,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     // ---- pipeline components (each behind a provider interface) ----
     private val speech = SpeechInput(ctx, this)
+    private val azureSpeech = AzureSpeechInput(this)
     private val detector = LanguageDetector()
     private val online = OnlineTranslator()
     private val offline = OfflineTranslator()
@@ -87,6 +94,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     private var lastSpokenText = ""
     private var lastSpokenAt = 0L
     private var consecutiveErrors = 0
+    private var pendingHeard: Lang = settings.me
+    private var pendingDetected: Lang? = null
+    private var flushJob: Job? = null
+
+    /** True when the Azure engine (continuous automatic language identification) is in use. */
+    val autoDetect: Boolean
+        get() = settings.recognitionEngine == RecognitionEngine.AZURE && settings.azureKey.isNotBlank()
+
+    private val activeSpeech: SpeechEngine get() = if (autoDetect) azureSpeech else speech
+
+    private fun cancelSpeech() {
+        speech.cancel()
+        azureSpeech.cancel()
+    }
 
     init {
         if (settings.saveHistory) history.addAll(store.loadHistory())
@@ -98,7 +119,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     // ================= Session control =================
 
     fun startSession() {
-        if (!speech.available) {
+        if (settings.recognitionEngine == RecognitionEngine.AZURE && settings.azureKey.isBlank()) {
+            toast = "Detecção automática precisa da chave Azure Speech (Configurações). Usando modo por turnos."
+        }
+        if (!autoDetect && !speech.available) {
             toast = "Reconhecimento de voz indisponível. Instale/atualize o app Google."
             status = "Reconhecimento de voz indisponível"
             return
@@ -111,10 +135,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     fun stopSession() {
+        if (pendingText.isNotBlank()) flushNow()
         sessionActive = false
         paused = false
         restartJob?.cancel()
-        speech.cancel()
+        cancelSpeech()
         listening = false
         partial = ""
         rms = 0f
@@ -127,7 +152,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         paused = !paused
         if (paused) {
             restartJob?.cancel()
-            speech.cancel()
+            cancelSpeech()
             listening = false
             rms = 0f
             status = "Escuta pausada"
@@ -145,7 +170,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         listenLang = l
         if (sessionActive && !paused && !speaking) {
             restartJob?.cancel()
-            speech.cancel()
+            cancelSpeech()
             startListening()
         }
     }
@@ -153,9 +178,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     private fun startListening() {
         if (!sessionActive || paused || speaking) return
         recLang = listenLang
-        speech.start(recLang, listOf(other(recLang)))
+        val silence = (settings.endPause * 1000).toLong()
+        speech.silenceMs = silence
+        azureSpeech.silenceMs = silence
+        azureSpeech.key = settings.azureKey
+        azureSpeech.region = settings.azureRegion
+        azureSpeech.candidates = (listOf(settings.me, settings.other) + Lang.entries).distinct()
+        activeSpeech.start(recLang, listOf(other(recLang)))
         listening = true
-        status = "Ouvindo ${recLang.flag} ${recLang.label}…"
+        status = if (autoDetect) "Ouvindo · 🌐 idioma automático" else "Ouvindo ${recLang.flag} ${recLang.label}…"
     }
 
     private fun restartSoon(ms: Long = 250) {
@@ -169,10 +200,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     // ================= Recognizer callbacks =================
 
     override fun onReady() {
-        if (listening) status = "Ouvindo ${recLang.flag} ${recLang.label}… fale naturalmente"
+        if (listening) status = if (autoDetect) "Ouvindo · 🌐 idioma automático — fale naturalmente"
+        else "Ouvindo ${recLang.flag} ${recLang.label}… fale naturalmente"
     }
 
     override fun onSpeechStart() {
+        flushJob?.cancel() // speaker is continuing: keep waiting
         status = "Captando fala…"
     }
 
@@ -181,6 +214,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     override fun onPartial(text: String) {
+        flushJob?.cancel() // speaker is continuing: keep waiting
         partial = text
     }
 
@@ -188,13 +222,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         listening = false
         rms = 0f
         consecutiveErrors = 0
-        val heard = recLang
         val t = text.trim()
         partial = ""
         if (t.isNotEmpty()) {
-            viewModelScope.launch { processLock.withLock { process(t, heard, Lang.fromCode(detectedLanguage)) } }
+            val det = Lang.fromCode(detectedLanguage)
+            // A different language means a different speaker: translate what we had first.
+            if (pendingText.isNotBlank() && det != null && pendingDetected != null && det != pendingDetected) flushNow()
+            if (pendingText.isBlank()) {
+                pendingHeard = recLang
+                pendingDetected = det
+            }
+            pendingText = joinSentences(pendingText, t)
+            scheduleFlush()
         }
-        restartSoon(150)
+        restartSoon(100)
+    }
+
+    /** Wait for a real pause before translating, so long sentences are not cut in the middle. */
+    private fun scheduleFlush(ms: Long = (settings.endPause * 1000).toLong()) {
+        flushJob?.cancel()
+        flushJob = viewModelScope.launch {
+            delay(ms)
+            flushNow()
+        }
+    }
+
+    /** Translate everything recognised so far right now (also: tap on the original-speech card). */
+    fun flushNow() {
+        flushJob?.cancel()
+        val text = pendingText.trim()
+        if (text.isEmpty()) return
+        pendingText = ""
+        val heard = pendingHeard
+        val det = pendingDetected
+        viewModelScope.launch { processLock.withLock { process(text, heard, det) } }
+    }
+
+    private fun joinSentences(a: String, b: String): String {
+        if (a.isBlank()) return b
+        val cjk = Pinyin.hasHan(a.takeLast(1)) || Pinyin.hasHan(b.take(1))
+        val end = a.trimEnd().lastOrNull()
+        val sep = when {
+            cjk -> if (end != null && end in "。！？，,.!?") "" else "，"
+            end != null && end in ".!?,;:" -> " "
+            else -> ", "
+        }
+        return a.trimEnd() + sep + b.trimStart()
     }
 
     override fun onError(code: Int) {
@@ -214,7 +287,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
             }
             SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                 partial = ""
+                if (pendingText.isNotBlank() && flushJob?.isActive != true) scheduleFlush(400)
                 restartSoon(150)
+                return
+            }
+            SpeechInput.AZURE_AUTH_ERROR -> {
+                stopSession()
+                status = SpeechInput.errorText(code)
+                toast = "Chave/região do Azure Speech inválida. Verifique nas configurações."
                 return
             }
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
@@ -283,7 +363,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
             status = "Tradução pronta"
             if (s.autoSwitch && sessionActive && !paused && listenLang != recLang) {
                 restartJob?.cancel()
-                speech.cancel()
+                cancelSpeech()
                 restartSoon(150)
             }
         }
@@ -332,7 +412,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         playJob = viewModelScope.launch {
             speaking = true
             restartJob?.cancel()
-            speech.cancel() // half-duplex: don't listen to our own voice
+            cancelSpeech() // half-duplex: don't listen to our own voice
             listening = false
             rms = 0f
             try {
@@ -411,6 +491,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (old.me != s.me || old.other != s.other) {
             if (listenLang != s.me && listenLang != s.other) listenFor(s.me)
         }
+        if (old.recognitionEngine != s.recognitionEngine || old.azureKey != s.azureKey || old.azureRegion != s.azureRegion) {
+            if (sessionActive && !paused && !speaking) {
+                restartJob?.cancel()
+                cancelSpeech()
+                restartSoon(400)
+            }
+        }
         if (old.saveHistory != s.saveHistory) {
             if (s.saveHistory) store.saveHistory(history) else store.clearHistory()
         }
@@ -439,6 +526,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     override fun onCleared() {
         speech.destroy()
+        azureSpeech.destroy()
         androidTts.shutdown()
         azureTts.shutdown()
         offline.close()
