@@ -35,7 +35,11 @@ class SettingsStore(context: Context) {
             forceOffline = p.getBoolean("forceOffline", d.forceOffline),
             deviceName = p.getString("deviceName", d.deviceName) ?: "",
             showPinyin = p.getBoolean("showPinyin", d.showPinyin),
-            endPause = p.getFloat("endPause", d.endPause),
+            endPause = p.getFloat("endPause2", d.endPause),
+            speedMode = p.getBoolean("speedMode", d.speedMode),
+            onDeviceRecognition = p.getBoolean("onDeviceRecognition", d.onDeviceRecognition),
+            fastVoice = p.getBoolean("fastVoice", d.fastVoice),
+            liveSubtitles = p.getBoolean("liveSubtitles", d.liveSubtitles),
             splitAudio = p.getBoolean("splitAudio", d.splitAudio),
         )
     }
@@ -59,7 +63,11 @@ class SettingsStore(context: Context) {
             .putBoolean("forceOffline", s.forceOffline)
             .putString("deviceName", s.deviceName)
             .putBoolean("showPinyin", s.showPinyin)
-            .putFloat("endPause", s.endPause)
+            .putFloat("endPause2", s.endPause)
+            .putBoolean("speedMode", s.speedMode)
+            .putBoolean("onDeviceRecognition", s.onDeviceRecognition)
+            .putBoolean("fastVoice", s.fastVoice)
+            .putBoolean("liveSubtitles", s.liveSubtitles)
             .putBoolean("splitAudio", s.splitAudio)
             .apply()
     }

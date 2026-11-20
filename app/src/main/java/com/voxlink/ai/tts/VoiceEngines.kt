@@ -146,27 +146,27 @@ class AndroidVoiceEngine(private val ctx: Context, enginePackage: String?) : Voi
         }
     }.sortedByDescending { score(it, true) }
 
-    private fun score(v: Voice, online: Boolean): Int {
+    private fun score(v: Voice, online: Boolean, preferLocal: Boolean = false): Int {
         var s = v.quality * 10
-        s += if (v.isNetworkConnectionRequired) (if (online) 6 else -10_000) else 3
+        s += if (v.isNetworkConnectionRequired) (if (!online) -10_000 else if (preferLocal) -150 else 6) else 3
         if (v.locale.country.equals("US", true)) s += 1
         if (v.latency >= Voice.LATENCY_VERY_HIGH) s -= 2
         return s
     }
 
-    private fun pick(lang: Lang, preferred: String?): Voice? {
+    private fun pick(lang: Lang, preferred: String?, preferLocal: Boolean): Voice? {
         val all = runCatching { tts.voices?.toList() }.getOrNull().orEmpty()
             .filter { !it.features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) }
         val online = Net.online(ctx)
         if (!preferred.isNullOrBlank()) {
             all.firstOrNull { it.name == preferred }?.let { if (online || !it.isNetworkConnectionRequired) return it }
         }
-        return voicesFor(all, lang).maxByOrNull { score(it, online) }?.takeIf { score(it, online) > 0 }
+        return voicesFor(all, lang).maxByOrNull { score(it, online, preferLocal) }?.takeIf { score(it, online, preferLocal) > -5000 }
     }
 
     override suspend fun speak(text: String, lang: Lang, s: AppSettings, device: AudioDeviceInfo?) {
         if (!ready.await()) throw IOException("Motor de voz do Android indisponível")
-        val v = pick(lang, s.androidVoices[lang.code])
+        val v = pick(lang, s.androidVoices[lang.code], s.fastVoice)
         if (v != null) tts.voice = v else tts.language = lang.locale
         tts.setSpeechRate(s.rate)
         tts.setPitch(s.pitch)

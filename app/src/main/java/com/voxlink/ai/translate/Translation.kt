@@ -1,6 +1,8 @@
 package com.voxlink.ai.translate
 
 import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
 import com.google.mlkit.nl.translate.TranslateLanguage
@@ -97,6 +99,23 @@ class OfflineTranslator : TranslationProvider {
 
     suspend fun download(from: Lang, to: Lang) {
         client(from, to).downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
+        downloadedAt = 0L
+    }
+
+    @Volatile private var downloaded: Set<String> = emptySet()
+    @Volatile private var downloadedAt = 0L
+
+    /** True when both language packs are on the phone (translation then takes ~0.1 s, no internet). */
+    suspend fun isReady(from: Lang, to: Lang): Boolean {
+        if (System.currentTimeMillis() - downloadedAt > 30_000) {
+            downloaded = runCatching {
+                RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java).await()
+                    .map { it.language }.toSet()
+            }.getOrDefault(downloaded)
+            downloadedAt = System.currentTimeMillis()
+        }
+        fun ok(l: Lang) = l == Lang.EN || mk(l) in downloaded
+        return ok(from) && ok(to)
     }
 
     override suspend fun translate(text: String, from: Lang, to: Lang): String {

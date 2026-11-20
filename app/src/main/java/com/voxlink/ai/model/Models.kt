@@ -73,7 +73,15 @@ data class AppSettings(
     /** Name shown to the other phone in sync mode. */
     val deviceName: String = "",
     /** Silence (seconds) that marks the end of what a person is saying. */
-    val endPause: Float = 1.5f,
+    val endPause: Float = 0.9f,
+    /** Speed first: on-device translation unless the online one arrives within ~0.7 s. */
+    val speedMode: Boolean = true,
+    /** On-device speech recognition (Android 12+): faster and works offline. */
+    val onDeviceRecognition: Boolean = true,
+    /** Prefer voices installed on the phone (start instantly) over online voices. */
+    val fastVoice: Boolean = true,
+    /** Show the translation live while the person is still talking. */
+    val liveSubtitles: Boolean = true,
     /** With headphones connected: my language → headphones, the other person's language → loudspeaker. */
     val splitAudio: Boolean = true,
 )

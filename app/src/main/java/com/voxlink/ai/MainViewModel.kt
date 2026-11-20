@@ -37,6 +37,9 @@ import com.voxlink.ai.tts.AudioRouter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -79,6 +82,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     var speaking by mutableStateOf(false); private set
     var muted by mutableStateOf(false); private set
     var offlineNow by mutableStateOf(false); private set
+    /** Translation shown live while the person is still speaking. */
+    var liveTranslation by mutableStateOf(""); private set
+    /** Time from end of speech to translation ready, e.g. "0,4 s". */
+    var lastLatency by mutableStateOf(""); private set
     var androidVoices by mutableStateOf<List<Voice>>(emptyList()); private set
     var androidEngines by mutableStateOf<List<TextToSpeech.EngineInfo>>(emptyList()); private set
     var toast by mutableStateOf<String?>(null)
@@ -117,6 +124,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     private var lastPartialSent = 0L
     private var consecutiveErrors = 0
     private var micPausedForTts = false
+    private var liveJob: Job? = null
+    private var flushAt = 0L
+    private val onDeviceFailed = mutableSetOf<Lang>()
+    private val previewCache = object : LinkedHashMap<String, String>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 60
+    }
 
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { viewModelScope.launch { refreshOffline() } }
@@ -132,6 +145,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                 .registerDefaultNetworkCallback(netCallback)
         }
         loadVoices()
+        autoPrepareOffline()
+    }
+
+    /** On Wi-Fi, quietly download the on-device translation packs for the selected pair (fast + offline). */
+    private fun autoPrepareOffline() {
+        viewModelScope.launch {
+            val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return@launch
+            if (!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) return@launch
+            val a = settings.me
+            val b = settings.other
+            if (offline.isReady(a, b)) return@launch
+            runCatching { offline.download(a, b) }
+        }
     }
 
     fun other(l: Lang): Lang = if (l == settings.me) settings.other else settings.me
@@ -174,6 +201,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (pendingText.isNotBlank()) flushNow()
         sessionActive = false
         paused = false
+        liveJob?.cancel()
+        liveTranslation = ""
         restartJob?.cancel()
         speech.cancel()
         listening = false
@@ -227,7 +256,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (syncConnected) listenLang = settings.me
         recLang = listenLang
         speech.silenceMs = (settings.endPause * 1000).toLong()
-        speech.preferOffline = offlineNow
+        speech.preferOffline = offlineNow || (settings.onDeviceRecognition && recLang !in onDeviceFailed)
         speech.start(recLang, if (fixedLanguage) emptyList() else listOf(other(recLang)))
         listening = true
         status = when {
@@ -263,6 +292,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     override fun onPartial(text: String) {
         flushJob?.cancel()
         partial = text
+        scheduleLivePreview()
         if (syncConnected) {
             val now = System.currentTimeMillis()
             if (now - lastPartialSent > 350) {
@@ -281,9 +311,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (t.isNotEmpty()) {
             if (pendingText.isBlank()) pendingHeard = recLang
             pendingText = joinSentences(pendingText, t)
-            scheduleFlush()
+            // A sentence that ends with punctuation is finished: translate almost immediately.
+            val pause = (settings.endPause * 1000).toLong()
+            val endsSentence = t.trimEnd().lastOrNull()?.let { it in ".?!。？！" } == true
+            scheduleFlush(if (endsSentence) minOf(pause, 450L) else pause)
+            scheduleLivePreview(0)
         }
-        restartSoon(100)
+        restartSoon(60)
     }
 
     /** Wait for a real pause before translating, so long sentences are not cut in the middle. */
@@ -298,11 +332,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     /** Translate everything recognised so far right now (also: tap on the original-speech card). */
     fun flushNow() {
         flushJob?.cancel()
+        liveJob?.cancel()
+        flushAt = System.currentTimeMillis()
         val text = pendingText.trim()
         if (text.isEmpty()) return
         pendingText = ""
         val heard = pendingHeard
         viewModelScope.launch { processLock.withLock { process(text, heard) } }
+    }
+
+    /** Live subtitles: translate what is being said (on-device, ~0.1 s) while the person talks. */
+    private fun scheduleLivePreview(debounce: Long = 280) {
+        if (!settings.liveSubtitles) return
+        val text = joinSentences(pendingText, partial).trim()
+        if (text.length < 2) return
+        val src = recLang
+        val tgt = if (syncConnected) (partnerLang ?: settings.other) else other(src)
+        liveJob?.cancel()
+        liveJob = viewModelScope.launch {
+            delay(debounce)
+            val key = "${src.code}|${tgt.code}|$text"
+            val out = previewCache[key] ?: run {
+                val r = if (offline.isReady(src, tgt)) runCatching { offline.translate(text, src, tgt) }.getOrNull()
+                else if (!offlineNow) runCatching { withTimeout(2500) { online.translate(text, src, tgt) } }.getOrNull()
+                else null
+                r?.also { previewCache[key] = it }
+            }
+            if (out != null && (pendingText.isNotBlank() || partial.isNotBlank())) liveTranslation = out
+        }
     }
 
     private fun joinSentences(a: String, b: String): String {
@@ -328,7 +385,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                 return
             }
             12, 13, 14 -> {
-                if (offlineNow) {
+                if (!offlineNow && settings.onDeviceRecognition && recLang !in onDeviceFailed) {
+                    // On-device pack missing: use the online recogniser now and download the pack for next time.
+                    onDeviceFailed += recLang
+                    speech.downloadOfflinePack(recLang)
+                    toast = "Baixando reconhecimento no aparelho para ${recLang.label}. Usando o online por enquanto."
+                } else if (offlineNow) {
                     toast = "Reconhecimento offline de ${recLang.label} não instalado. Vá em ⚙ → Preparar modo offline."
                     speech.downloadOfflinePack(recLang)
                 }
@@ -386,8 +448,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         translating = true
         status = "Traduzindo ${src.flag} → ${tgt.flag}…"
         val prepared = if (s.technicalMode) glossary.apply(text, src, tgt) else text
+        val t0 = System.currentTimeMillis()
         val result = translate(prepared, src, tgt)
         translating = false
+        liveTranslation = ""
+        val ms = System.currentTimeMillis() - (if (flushAt in 1..t0) flushAt else t0)
+        lastLatency = String.format(java.util.Locale("pt", "BR"), "%.1f s", ms / 1000f)
 
         if (result == null) {
             lastTranslation = if (offlineNow) "Tradução offline indisponível — ⚙ → Preparar modo offline (baixar pacotes)."
@@ -441,22 +507,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     private data class TrResult(val text: String, val provider: String, val sourceRoman: String? = null, val targetRoman: String? = null)
 
-    private suspend fun translate(text: String, from: Lang, to: Lang): TrResult? {
-        if (from == to) return TrResult(text, "—")
-        if (!offlineNow && settings.translationMode == TranslationMode.ONLINE_THEN_OFFLINE) {
-            try {
-                val t = withTimeout(9000) { online.translateFull(text, from, to) }
-                return TrResult(t.text, "Online", t.sourceRoman, t.targetRoman)
-            } catch (e: Exception) {
-                if (e is CancellationException && e !is TimeoutCancellationException) throw e
-            }
+    /**
+     * Fast translation: on-device (ML Kit, ~0.1 s) and online run in parallel. The online result (better
+     * quality + pinyin) is used only if it arrives in time; otherwise the on-device one, so it is never slow.
+     */
+    private suspend fun translate(text: String, from: Lang, to: Lang): TrResult? = coroutineScope {
+        if (from == to) return@coroutineScope TrResult(text, "—")
+        val localReady = offline.isReady(from, to)
+        val useOnline = !offlineNow && settings.translationMode == TranslationMode.ONLINE_THEN_OFFLINE
+        val onlineJob = if (useOnline) async {
+            runCatching { withTimeout(8000) { online.translateFull(text, from, to) } }.getOrNull()
+        } else null
+        val localJob = if (localReady) async { runCatching { offline.translate(text, from, to) }.getOrNull() } else null
+
+        val wait = if (settings.speedMode) 700L else 4000L
+        val on = when {
+            onlineJob == null -> null
+            localJob == null -> onlineJob.await()
+            else -> withTimeoutOrNull(wait) { onlineJob.await() }
         }
-        return try {
-            TrResult(withTimeout(90_000) { offline.translate(text, from, to) }, "Offline")
-        } catch (e: Exception) {
-            if (e is CancellationException && e !is TimeoutCancellationException) throw e
-            null
+        if (on != null) {
+            localJob?.cancel()
+            return@coroutineScope TrResult(on.text, "Online", on.sourceRoman, on.targetRoman)
         }
+        onlineJob?.cancel()
+        localJob?.await()?.let { return@coroutineScope TrResult(it, "No aparelho") }
+        if (!localReady) {
+            // Packs not downloaded yet: download now (needs internet once), then translate.
+            runCatching { withTimeout(90_000) { offline.translate(text, from, to) } }.getOrNull()
+                ?.let { return@coroutineScope TrResult(it, "No aparelho") }
+        }
+        null
     }
 
     /** Downloads everything the offline mode needs: translation packs + offline recognition packs. */

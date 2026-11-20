@@ -248,7 +248,13 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
-                        if (vm.lastTranslation.isEmpty()) {
+                        if (vm.liveTranslation.isNotBlank()) {
+                            Column {
+                                Text("● ao vivo", color = Cyan, fontSize = 11.sp)
+                                Text(vm.liveTranslation, color = Color(0xFFBFE9FF), fontSize = 24.sp, lineHeight = 32.sp, fontStyle = FontStyle.Italic)
+                                PinyinLine(vm.liveTranslation, s.showPinyin)
+                            }
+                        } else if (vm.lastTranslation.isEmpty()) {
                             Text(if (vm.translating) "Traduzindo…" else "A tradução aparece aqui…", color = Color(0xFF718BA8), fontSize = 16.sp)
                         } else {
                             Column {
@@ -263,7 +269,11 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                 }
                 if (vm.lastProvider.isNotEmpty()) {
                     val voice = if (vm.offlineNow) "offline" else "online"
-                    Text("Modo $voice · tradução ${vm.lastProvider}" + if (s.technicalMode) " · modo técnico" else "", color = Muted, fontSize = 12.sp)
+                    Text(
+                        (if (vm.lastLatency.isNotBlank()) "⏱ ${vm.lastLatency} · " else "") +
+                            "modo $voice · tradução ${vm.lastProvider}" + if (s.technicalMode) " · técnico" else "",
+                        color = Muted, fontSize = 12.sp,
+                    )
                 }
             }
         }
@@ -699,6 +709,14 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
             }) { Text("Concluir") }
         }
         Hint("Tudo grátis, sem chave nem assinatura. Online é o modo mais rápido; sem internet o app passa sozinho para o modo offline.")
+
+        Section("Desempenho")
+        SwitchRow("Prioridade velocidade", s.speedMode) { v -> vm.update { it.copy(speedMode = v) } }
+        Hint("Traduz no aparelho (≈0,1 s) e só usa a tradução online se ela chegar em até 0,7 s. Desligado: espera a online (melhor qualidade, mais lenta).")
+        SwitchRow("Reconhecimento de fala no aparelho", s.onDeviceRecognition) { v -> vm.update { it.copy(onDeviceRecognition = v) } }
+        Hint("Android 12+: mais rápido e funciona sem internet. Se o pacote do idioma não estiver baixado, o app usa o online e baixa o pacote.")
+        SwitchRow("Vozes do aparelho (começam na hora)", s.fastVoice) { v -> vm.update { it.copy(fastVoice = v) } }
+        SwitchRow("Legenda traduzida ao vivo enquanto fala", s.liveSubtitles) { v -> vm.update { it.copy(liveSubtitles = v) } }
 
         Section("Modo offline")
         SwitchRow("Usar modo offline mesmo com internet", s.forceOffline) { v -> vm.update { it.copy(forceOffline = v) } }
