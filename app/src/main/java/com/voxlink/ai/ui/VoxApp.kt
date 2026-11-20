@@ -1,6 +1,8 @@
 package com.voxlink.ai.ui
 
+import android.Manifest
 import android.content.ClipData
+import android.os.Build
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -39,6 +41,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -76,9 +79,9 @@ import androidx.compose.ui.unit.sp
 import com.voxlink.ai.MainViewModel
 import com.voxlink.ai.model.Lang
 import com.voxlink.ai.model.Pinyin
-import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.TranslationMode
-import com.voxlink.ai.model.WhisperModel
+import com.voxlink.ai.sync.SyncState
+import com.voxlink.ai.sync.SyncTransport
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -94,11 +97,12 @@ private val White = Color(0xFFEFF7FF)
 private val Line = Color(0xFF164A76)
 
 @Composable
-fun VoxApp(vm: MainViewModel, onMic: () -> Unit) {
+fun VoxApp(vm: MainViewModel, onMic: () -> Unit, requestPermissions: (List<String>, () -> Unit) -> Unit) {
     val ctx = LocalContext.current
     val view = LocalView.current
     var showSettings by remember { mutableStateOf(false) }
     var faceToFace by remember { mutableStateOf(false) }
+    var showSync by remember { mutableStateOf(false) }
 
     SideEffect { view.keepScreenOn = vm.sessionActive && vm.settings.keepScreenOn }
     LaunchedEffect(vm.toast) {
@@ -122,18 +126,22 @@ fun VoxApp(vm: MainViewModel, onMic: () -> Unit) {
                     BackHandler { showSettings = false }
                     SettingsScreen(vm) { showSettings = false }
                 }
+                showSync -> {
+                    BackHandler { showSync = false }
+                    SyncScreen(vm, requestPermissions) { showSync = false }
+                }
                 faceToFace -> {
                     BackHandler { faceToFace = false }
                     FaceToFaceScreen(vm, onMic) { faceToFace = false }
                 }
-                else -> MainScreen(vm, onMic, openSettings = { showSettings = true }, openFaceToFace = { faceToFace = true })
+                else -> MainScreen(vm, onMic, openSettings = { showSettings = true }, openFaceToFace = { faceToFace = true }, openSync = { showSync = true })
             }
         }
     }
 }
 
 @Composable
-private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit) {
+private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () -> Unit, openFaceToFace: () -> Unit, openSync: () -> Unit) {
     val ctx = LocalContext.current
     val s = vm.settings
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -151,8 +159,12 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     }
                     Text("INTÉRPRETE DE VOZ AO VIVO", fontSize = 11.sp, color = Muted, letterSpacing = 1.sp)
                 }
+                OutlinedButton(onClick = openSync, border = BorderStroke(1.dp, if (vm.syncConnected) Green else Line)) {
+                    Text("📱", fontSize = 18.sp, color = White)
+                }
+                Spacer(Modifier.width(4.dp))
                 OutlinedButton(onClick = openFaceToFace, border = BorderStroke(1.dp, Line)) { Text("⇅", fontSize = 20.sp, color = White) }
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(4.dp))
                 OutlinedButton(onClick = openSettings, border = BorderStroke(1.dp, Line)) { Text("⚙", fontSize = 20.sp, color = White) }
             }
         }
@@ -166,28 +178,33 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
             }
         }
 
-        // Who is speaking now
+        // Mode banner: two phones / offline direction / online turns
         item {
-            Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Ouvindo:", color = Muted, fontSize = 13.sp)
-                Spacer(Modifier.width(8.dp))
-                if (vm.autoDetect) {
-                    Box(
-                        Modifier.clip(RoundedCornerShape(14.dp)).background(Green.copy(alpha = .15f))
-                            .border(1.dp, Green, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) { Text("🌐 Automático (Whisper) · PT · EN · 中文", color = Green, fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
-                } else listOf(s.me, s.other).forEach { l ->
-                    val sel = vm.listenLang == l
-                    Box(
-                        Modifier.padding(end = 8.dp).clip(RoundedCornerShape(14.dp))
-                            .background(if (sel) Cyan.copy(alpha = .18f) else Color.Transparent)
-                            .border(1.dp, if (sel) Cyan else Line, RoundedCornerShape(14.dp))
-                            .clickable { vm.listenFor(l) }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) { Text("${l.flag} ${l.short}", color = if (sel) Cyan else White, fontWeight = FontWeight.SemiBold) }
-                }
-                Spacer(Modifier.weight(1f))
-                if (!vm.autoDetect) {
+            when {
+                vm.syncConnected -> ModeBanner(
+                    Green, "📱⇄📱 CONECTADO A ${(vm.partnerName ?: "OUTRO CELULAR").uppercase()}",
+                    "Você fala ${s.me.flag} ${s.me.label} · o outro celular fala ${(vm.partnerLang ?: s.other).let { "${it.flag} ${it.label}" }}",
+                    "Gerenciar", openSync,
+                )
+                vm.offlineNow -> ModeBanner(
+                    Color(0xFFFFC870), "OFFLINE · SEM INTERNET",
+                    "${vm.listenLang.flag} ${vm.listenLang.label}  →  ${vm.other(vm.listenLang).flag} ${vm.other(vm.listenLang).label}",
+                    "⇄ Trocar", { vm.swapDirection() }, big = true,
+                )
+                else -> Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Ouvindo:", color = Muted, fontSize = 13.sp)
+                    Spacer(Modifier.width(8.dp))
+                    listOf(s.me, s.other).forEach { l ->
+                        val sel = vm.listenLang == l
+                        Box(
+                            Modifier.padding(end = 8.dp).clip(RoundedCornerShape(14.dp))
+                                .background(if (sel) Cyan.copy(alpha = .18f) else Color.Transparent)
+                                .border(1.dp, if (sel) Cyan else Line, RoundedCornerShape(14.dp))
+                                .clickable { vm.listenFor(l) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) { Text("${l.flag} ${l.short}", color = if (sel) Cyan else White, fontWeight = FontWeight.SemiBold) }
+                    }
+                    Spacer(Modifier.weight(1f))
                     Text("Alternar", color = Muted, fontSize = 12.sp)
                     Switch(checked = s.autoSwitch, onCheckedChange = { v -> vm.update { it.copy(autoSwitch = v) } })
                 }
@@ -198,7 +215,7 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
 
         // Original speech
         item {
-            val live = listOf(vm.pendingText, vm.partial).filter { it.isNotBlank() }.joinToString(" ")
+            val live = listOf(vm.remotePartial, vm.pendingText, vm.partial).filter { it.isNotBlank() }.joinToString(" ")
             Card(border = Blue, onClick = { vm.flushNow() }) {
                 val det = vm.lastFrom
                 Text(
@@ -245,8 +262,8 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     }
                 }
                 if (vm.lastProvider.isNotEmpty()) {
-                    val voice = if (vm.autoDetect) "Whisper offline" else "Google"
-                    Text("Reconhecimento $voice · tradução ${vm.lastProvider}" + if (s.technicalMode) " · modo técnico" else "", color = Muted, fontSize = 12.sp)
+                    val voice = if (vm.offlineNow) "offline" else "online"
+                    Text("Modo $voice · tradução ${vm.lastProvider}" + if (s.technicalMode) " · modo técnico" else "", color = Muted, fontSize = 12.sp)
                 }
             }
         }
@@ -434,9 +451,9 @@ private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> 
     Column(Modifier.fillMaxSize()) {
         FacePanel(
             lang = s.other, text = textFor(s.other), pinyin = pinyinFor(s.other), live = if (vm.lastFrom == s.other || vm.listenLang == s.other) live else "",
-            active = !vm.autoDetect && vm.listenLang == s.other && vm.listening, showPinyin = s.showPinyin,
+            active = vm.listenLang == s.other && vm.listening, showPinyin = s.showPinyin,
             modifier = Modifier.weight(1f).rotate(180f),
-        ) { if (!vm.autoDetect) vm.listenFor(s.other) }
+        ) { vm.listenFor(s.other) }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween,
@@ -455,9 +472,9 @@ private fun FaceToFaceScreen(vm: MainViewModel, onMic: () -> Unit, close: () -> 
             textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
         FacePanel(
             lang = s.me, text = textFor(s.me), pinyin = pinyinFor(s.me), live = if (vm.lastFrom == s.me || vm.listenLang == s.me) live else "",
-            active = !vm.autoDetect && vm.listenLang == s.me && vm.listening, showPinyin = s.showPinyin,
+            active = vm.listenLang == s.me && vm.listening, showPinyin = s.showPinyin,
             modifier = Modifier.weight(1f),
-        ) { if (!vm.autoDetect) vm.listenFor(s.me) }
+        ) { vm.listenFor(s.me) }
     }
 }
 
@@ -493,6 +510,179 @@ private val SAMPLE_HINT = mapOf(
     Lang.ZH to "点这里，然后说中文",
 )
 
+@Composable
+private fun ModeBanner(color: Color, title: String, line: String, action: String, onAction: () -> Unit, big: Boolean = false) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(16.dp))
+            .background(color.copy(alpha = .12f)).border(1.dp, color, RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = color, fontSize = 11.sp, letterSpacing = 1.sp, fontWeight = FontWeight.SemiBold)
+            Text(line, color = White, fontSize = if (big) 18.sp else 14.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Button(onClick = onAction, colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Bg)) { Text(action) }
+    }
+}
+
+// ======================= Two phones =======================
+
+@Composable
+private fun SyncScreen(vm: MainViewModel, requestPermissions: (List<String>, () -> Unit) -> Unit, close: () -> Unit) {
+    var tab by remember { mutableStateOf(SyncTransport.WIFI) }
+    var manualIp by remember { mutableStateOf("") }
+    val connected = vm.syncConnected
+
+    fun withPerms(t: SyncTransport, action: () -> Unit) {
+        val perms = when (t) {
+            SyncTransport.WIFI -> emptyList()
+            SyncTransport.WIFI_DIRECT -> if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+            else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            SyncTransport.BLUETOOTH -> if (Build.VERSION.SDK_INT >= 31) listOf(Manifest.permission.BLUETOOTH_CONNECT) else emptyList()
+        }
+        requestPermissions(perms, action)
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Dois celulares", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = White, modifier = Modifier.weight(1f))
+            Button(onClick = close) { Text("Voltar") }
+        }
+        Hint("Cada pessoa usa o próprio celular com o VoxLink (de preferência com fone). Cada celular ouve só o seu dono e manda a tradução para o outro, que fala no idioma dele. Os dois podem falar sem esperar a vez. Não precisa de internet nem de servidor.")
+
+        // Status
+        val stColor = when (vm.syncState) {
+            SyncState.CONNECTED -> Green
+            SyncState.IDLE -> Muted
+            else -> Cyan
+        }
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 12.dp).clip(RoundedCornerShape(14.dp))
+                .border(1.dp, stColor, RoundedCornerShape(14.dp)).padding(12.dp)
+        ) {
+            Text(
+                when (vm.syncState) {
+                    SyncState.CONNECTED -> "● Conectado a ${vm.partnerName ?: "outro celular"}"
+                    SyncState.WAITING -> "● Aguardando / procurando"
+                    SyncState.CONNECTING -> "● Conectando…"
+                    SyncState.IDLE -> "○ Desconectado"
+                }, color = stColor, fontWeight = FontWeight.SemiBold
+            )
+            if (vm.syncInfo.isNotBlank()) Text(vm.syncInfo, color = Muted, fontSize = 12.sp)
+            if (connected) {
+                Text(
+                    "Você fala ${vm.settings.me.flag} ${vm.settings.me.label} · ${vm.partnerName ?: "o outro"} fala ${(vm.partnerLang ?: vm.settings.other).flag} ${(vm.partnerLang ?: vm.settings.other).label}",
+                    color = White, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp)
+                )
+                Text("Agora volte e toque no microfone nos dois celulares.", color = Green, fontSize = 13.sp)
+            }
+            if (vm.syncState != SyncState.IDLE) {
+                OutlinedButton(onClick = { vm.syncStop() }, modifier = Modifier.padding(top = 6.dp)) { Text(if (connected) "Desconectar" else "Cancelar") }
+            }
+        }
+
+        if (!connected) {
+            // Transport tabs
+            Row(Modifier.fillMaxWidth()) {
+                SyncTransport.entries.forEach { t ->
+                    val sel = tab == t
+                    Box(
+                        Modifier.weight(1f).padding(2.dp).clip(RoundedCornerShape(12.dp))
+                            .background(if (sel) Cyan.copy(alpha = .18f) else Color.Transparent)
+                            .border(1.dp, if (sel) Cyan else Line, RoundedCornerShape(12.dp))
+                            .clickable { tab = t }.padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(t.label, color = if (sel) Cyan else White, fontSize = 12.sp, textAlign = TextAlign.Center) }
+                }
+            }
+
+            when (tab) {
+                SyncTransport.WIFI -> {
+                    Section("Wi-Fi local ou hotspot")
+                    Steps(
+                        "Os dois celulares na mesma rede Wi-Fi. Se a rede da empresa bloquear, ligue o roteador/hotspot de um celular e conecte o outro nele.",
+                        "No celular A toque em \"Aguardar conexão\".",
+                        "No celular B toque em \"Procurar\" e escolha o A na lista — ou digite o IP mostrado no A.",
+                    )
+                    Row(Modifier.padding(top = 8.dp)) {
+                        Button(onClick = { vm.syncHostWifi() }) { Text("Aguardar conexão") }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = { vm.syncDiscoverWifi() }) { Text("Procurar") }
+                    }
+                    Text("IP deste celular: ${vm.syncLocalIp()}", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                        OutlinedTextField(
+                            value = manualIp, onValueChange = { manualIp = it }, singleLine = true,
+                            label = { Text("IP do outro celular") }, modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = { if (manualIp.isNotBlank()) vm.syncJoinWifi(manualIp) }) { Text("Conectar") }
+                    }
+                }
+                SyncTransport.WIFI_DIRECT -> {
+                    Section("Wi-Fi Direct (celular ↔ celular, sem roteador)")
+                    Steps(
+                        "Ligue o Wi-Fi nos dois celulares (não precisa estar conectado a nenhuma rede). No Android 12 ou anterior, ligue também a Localização.",
+                        "Toque em \"Procurar\" nos DOIS celulares.",
+                        "Em um deles, toque no nome do outro na lista e aceite o convite que aparece no outro celular.",
+                    )
+                    Button(onClick = { withPerms(SyncTransport.WIFI_DIRECT) { vm.syncStartWifiDirect() } }, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Procurar")
+                    }
+                }
+                SyncTransport.BLUETOOTH -> {
+                    Section("Bluetooth")
+                    Steps(
+                        "Pareie os dois celulares uma vez em Configurações → Bluetooth.",
+                        "No celular A toque em \"Aguardar conexão\".",
+                        "No celular B toque em \"Escolher aparelho\" e selecione o A. Alcance ≈ 10 m.",
+                    )
+                    Row(Modifier.padding(top = 8.dp)) {
+                        Button(onClick = { withPerms(SyncTransport.BLUETOOTH) { vm.syncHostBluetooth() } }) { Text("Aguardar conexão") }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = { withPerms(SyncTransport.BLUETOOTH) { vm.syncListBluetooth() } }) { Text("Escolher aparelho") }
+                    }
+                }
+            }
+
+            val peers = vm.syncPeers.filter { it.transport == tab }
+            if (peers.isNotEmpty()) {
+                Section("Celulares encontrados")
+                peers.forEach { p ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF0A1A2E)).border(1.dp, Line, RoundedCornerShape(12.dp))
+                            .clickable { vm.syncConnectPeer(p) }.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("📱", fontSize = 18.sp)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(p.name, color = White, fontWeight = FontWeight.SemiBold)
+                            Text(p.id, color = Muted, fontSize = 11.sp)
+                        }
+                        Text("Conectar ›", color = Cyan)
+                    }
+                }
+            }
+        }
+
+        Section("Dica")
+        Hint("Com fone de ouvido em cada celular, cada pessoa escuta a tradução só no próprio fone e o microfone nunca para de ouvir. Sem fone, o celular pausa o microfone enquanto fala a tradução.")
+    }
+}
+
+@Composable
+private fun Steps(vararg steps: String) {
+    steps.forEachIndexed { i, t ->
+        Row(Modifier.padding(vertical = 3.dp)) {
+            Text("${i + 1}.", color = Cyan, fontWeight = FontWeight.Bold, modifier = Modifier.width(22.dp))
+            Text(t, color = White, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+    }
+}
+
 // ======================= Settings =======================
 
 @Composable
@@ -508,23 +698,25 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
                 close()
             }) { Text("Concluir") }
         }
-        Hint("Tudo grátis, sem chave nem assinatura: Whisper (open source), tradução Google online ou ML Kit no aparelho, vozes do próprio Android.")
+        Hint("Tudo grátis, sem chave nem assinatura. Online é o modo mais rápido; sem internet o app passa sozinho para o modo offline.")
+
+        Section("Modo offline")
+        SwitchRow("Usar modo offline mesmo com internet", s.forceOffline) { v -> vm.update { it.copy(forceOffline = v) } }
+        Hint("No offline não há detecção automática: você escolhe o sentido na tela principal (ex.: 🇧🇷 Português → 🇨🇳 Chinês) e toca em \"⇄ Trocar\" quando a outra pessoa for falar. Usa o reconhecimento, a tradução e as vozes baixadas no celular.")
+        Button(onClick = { vm.prepareOffline() }, modifier = Modifier.padding(top = 6.dp)) { Text("Preparar modo offline (baixar pacotes)") }
+        Row(Modifier.padding(top = 6.dp)) {
+            OutlinedButton(onClick = {
+                runCatching { ctx.startActivity(Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    .onFailure { runCatching { ctx.startActivity(Intent(android.provider.Settings.ACTION_LOCALE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } }
+            }) { Text("Reconhecimento offline") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = {
+                runCatching { ctx.startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            }) { Text("Vozes offline") }
+        }
+        Hint("Faça uma vez, com Wi-Fi: 1) toque em Preparar; 2) em Reconhecimento offline, baixe Português (Brasil) e Chinês; 3) em Vozes offline (Serviços de voz do Google → Instalar dados de voz), baixe as vozes de Português (Brasil) e Chinês (Mandarim).")
 
         Section("Reconhecimento de fala")
-        RadioRow("Google (online, grátis) — idioma por turnos", s.recognitionEngine == RecognitionEngine.ANDROID) {
-            vm.update { it.copy(recognitionEngine = RecognitionEngine.ANDROID) }
-        }
-        RadioRow("Whisper offline (open source) — idioma automático", s.recognitionEngine == RecognitionEngine.WHISPER) {
-            vm.update { it.copy(recognitionEngine = RecognitionEngine.WHISPER) }
-            if (!vm.whisperReady()) vm.downloadWhisper()
-        }
-        Hint(
-            if (s.recognitionEngine == RecognitionEngine.WHISPER)
-                "Cada frase tem o idioma identificado sozinho (PT · EN · 中文), sem internet e sem tocar em nada. Leva 1–3 s para transcrever, conforme o celular."
-            else
-                "O Google ouve um idioma por vez e alterna após cada tradução. Sem internet, o app passa sozinho para o Whisper offline (se o modelo estiver baixado)."
-        )
-        WhisperModelRow(vm)
         LabeledSlider("Pausa para considerar que terminou de falar", s.endPause, 0.6f..3.0f, "%.1f s") { v -> vm.update { it.copy(endPause = v) } }
         Hint("Aumente se o app estiver traduzindo antes de a pessoa terminar a frase.")
         SwitchRow("Mostrar pinyin no texto em chinês", s.showPinyin) { v -> vm.update { it.copy(showPinyin = v) } }
@@ -565,7 +757,7 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
         RadioRow("Somente offline (no aparelho)", s.translationMode == TranslationMode.OFFLINE_ONLY) {
             vm.update { it.copy(translationMode = TranslationMode.OFFLINE_ONLY) }
         }
-        OutlinedButton(onClick = { vm.downloadOfflinePacks() }) { Text("Baixar pacotes offline PT · EN · 中文") }
+        Hint("Online: tradução + pinyin do Google (grátis). Offline: ML Kit no aparelho (grátis).")
 
         Section("Modo técnico industrial")
         SwitchRow("Usar glossário técnico (${vm.glossarySize} termos)", s.technicalMode) { v -> vm.update { it.copy(technicalMode = v) } }
@@ -578,39 +770,19 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
             Text("Salvar glossário")
         }
 
+        Section("Dois celulares")
+        var nameText by remember { mutableStateOf(s.deviceName) }
+        OutlinedTextField(
+            value = nameText, onValueChange = { nameText = it; vm.update { st -> st.copy(deviceName = it) } },
+            label = { Text("Nome deste celular (aparece no outro)") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+        )
+
         Section("Privacidade")
         SwitchRow("Salvar histórico no aparelho", s.saveHistory) { v -> vm.update { it.copy(saveHistory = v) } }
         SwitchRow("Manter tela ligada durante a conversa", s.keepScreenOn) { v -> vm.update { it.copy(keepScreenOn = v) } }
         OutlinedButton(onClick = { vm.clearHistory() }) { Text("Apagar histórico", color = Color(0xFFFF7A7A)) }
         Hint("O áudio vai apenas para o reconhecedor de voz do Android. Nada é gravado. O texto é enviado ao serviço de tradução online (ou fica no aparelho no modo offline).")
         Spacer(Modifier.height(30.dp))
-    }
-}
-
-@Composable
-private fun WhisperModelRow(vm: MainViewModel) {
-    val s = vm.settings
-    @Suppress("UNUSED_VARIABLE") val tick = vm.whisperReadyTick
-    Column(Modifier.padding(top = 6.dp)) {
-        Text("Modelo Whisper offline", color = Muted, fontSize = 13.sp)
-        WhisperModel.entries.forEach { m ->
-            val ready = vm.whisperReady(m)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(selected = s.whisperModel == m, onClick = { vm.update { it.copy(whisperModel = m) } })
-                Column(Modifier.weight(1f)) {
-                    Text(m.label, color = White, fontSize = 14.sp)
-                    Text(if (ready) "✓ baixado" else "${m.sizeMb} MB — baixar uma vez (Wi-Fi)", color = if (ready) Green else Muted, fontSize = 11.sp)
-                }
-                if (ready) TextButton(onClick = { vm.deleteWhisper(m) }) { Text("Apagar", color = Color(0xFFFF7A7A)) }
-                else TextButton(onClick = { vm.update { it.copy(whisperModel = m) }; vm.downloadWhisper(m) }, enabled = vm.whisperProgress == null) { Text("Baixar") }
-            }
-        }
-        vm.whisperProgress?.let { p ->
-            Text("Baixando modelo… $p%", color = Cyan, fontSize = 13.sp)
-            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Line)) {
-                Box(Modifier.fillMaxWidth(p / 100f).height(6.dp).background(Cyan))
-            }
-        }
     }
 }
 

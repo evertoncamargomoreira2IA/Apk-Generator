@@ -1,6 +1,10 @@
 package com.voxlink.ai
 
 import android.app.Application
+import android.media.AudioDeviceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Build
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
@@ -15,16 +19,15 @@ import com.voxlink.ai.data.Net
 import com.voxlink.ai.data.SettingsStore
 import com.voxlink.ai.model.AppSettings
 import com.voxlink.ai.model.Entry
-import com.voxlink.ai.model.Pinyin
 import com.voxlink.ai.model.Lang
-import com.voxlink.ai.model.RecognitionEngine
+import com.voxlink.ai.model.Pinyin
 import com.voxlink.ai.model.SAMPLE_PHRASES
 import com.voxlink.ai.model.TranslationMode
-import com.voxlink.ai.model.WhisperModel
-import com.voxlink.ai.speech.WhisperModels
-import com.voxlink.ai.speech.WhisperSpeechInput
-import com.voxlink.ai.speech.SpeechEngine
 import com.voxlink.ai.speech.SpeechInput
+import com.voxlink.ai.sync.Peer
+import com.voxlink.ai.sync.SyncManager
+import com.voxlink.ai.sync.SyncState
+import com.voxlink.ai.sync.SyncTransport
 import com.voxlink.ai.translate.Glossary
 import com.voxlink.ai.translate.LanguageDetector
 import com.voxlink.ai.translate.OfflineTranslator
@@ -39,13 +42,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 
 /**
- * Conversation manager: listen → detect language → translate → queue natural voice → listen again.
- * Half-duplex: the microphone is paused while the translation is spoken, so the app never
- * re-translates its own voice.
+ * Conversation manager.
+ *  • Online (default, fastest): Google recogniser + online translation + pinyin, languages alternate by turns.
+ *  • Offline: fixed direction chosen by the user (e.g. Português → 中文, tap "Trocar"), on-device recogniser,
+ *    ML Kit translation and the voices downloaded on the phone. No AI model, no internet.
+ *  • Two phones (sync): each phone listens only to its owner and sends the translation to the other phone,
+ *    which speaks it. Wi-Fi local / hotspot, Wi-Fi Direct or Bluetooth.
  */
-class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callbacks {
+class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callbacks, SyncManager.Listener {
 
     private val ctx = app.applicationContext
     private val store = SettingsStore(ctx)
@@ -59,87 +66,98 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     var listenLang by mutableStateOf(settings.me); private set
     var status by mutableStateOf("Pronto para ouvir"); private set
     var partial by mutableStateOf(""); private set
-    /** Sentences already recognised but waiting for the speaker to finish. */
     var pendingText by mutableStateOf(""); private set
     var rms by mutableFloatStateOf(0f); private set
     var lastOriginal by mutableStateOf(""); private set
     var lastFrom by mutableStateOf<Lang?>(null); private set
     var lastTranslation by mutableStateOf(""); private set
+    var lastTo by mutableStateOf<Lang?>(null); private set
     var lastOriginalPinyin by mutableStateOf<String?>(null); private set
     var lastTranslationPinyin by mutableStateOf<String?>(null); private set
-    var lastTo by mutableStateOf<Lang?>(null); private set
     var lastProvider by mutableStateOf(""); private set
     var translating by mutableStateOf(false); private set
     var speaking by mutableStateOf(false); private set
     var muted by mutableStateOf(false); private set
+    var offlineNow by mutableStateOf(false); private set
     var androidVoices by mutableStateOf<List<Voice>>(emptyList()); private set
     var androidEngines by mutableStateOf<List<TextToSpeech.EngineInfo>>(emptyList()); private set
     var toast by mutableStateOf<String?>(null)
-    /** True while the offline Whisper engine (automatic language) is in use. */
-    var autoDetect by mutableStateOf(false); private set
-    /** Whisper model download progress (0-100) or null. */
-    var whisperProgress by mutableStateOf<Int?>(null); private set
-    var whisperReadyTick by mutableStateOf(0); private set
     val history = mutableStateListOf<Entry>()
 
-    // ---- pipeline components (each behind a provider interface) ----
+    // ---- sync state ----
+    var syncState by mutableStateOf(SyncState.IDLE); private set
+    var syncInfo by mutableStateOf(""); private set
+    var syncPeers by mutableStateOf<List<Peer>>(emptyList()); private set
+    var partnerName by mutableStateOf<String?>(null); private set
+    var partnerLang by mutableStateOf<Lang?>(null); private set
+    var remotePartial by mutableStateOf(""); private set
+    val syncConnected: Boolean get() = syncState == SyncState.CONNECTED
+
+    // ---- pipeline components ----
     private val speech = SpeechInput(ctx, this)
-    private val whisper = WhisperSpeechInput(ctx, this)
-    private val router = AudioRouter(ctx)
     private val detector = LanguageDetector()
     private val online = OnlineTranslator()
     private val offline = OfflineTranslator()
     private var glossary = Glossary(settings.glossary)
     var androidTts = AndroidVoiceEngine(ctx, settings.androidEngine); private set
+    private val router = AudioRouter(ctx)
+    private val sync = SyncManager(ctx, this)
 
     private val processLock = Mutex()
     private var restartJob: Job? = null
     private var playJob: Job? = null
+    private var flushJob: Job? = null
     private val playQueue = ArrayDeque<Pair<String, Lang>>()
     private var recLang: Lang = settings.me
+    private var pendingHeard: Lang = settings.me
     private var lastFinalText = ""
     private var lastFinalAt = 0L
     private var lastSpokenText = ""
     private var lastSpokenAt = 0L
+    private var lastPartialSent = 0L
     private var consecutiveErrors = 0
-    private var pendingHeard: Lang = settings.me
-    private var pendingDetected: Lang? = null
-    private var flushJob: Job? = null
-
     private var micPausedForTts = false
-    private var activeSpeech: SpeechEngine = speech
 
-    private fun cancelSpeech() {
-        speech.cancel()
-        whisper.cancel()
-    }
-
-    fun whisperReady(m: WhisperModel = settings.whisperModel): Boolean =
-        com.voxlink.ai.speech.WhisperLib.loaded && WhisperModels.ready(ctx, m)
-
-    /**
-     * Engine choice: Whisper when selected, or automatically when there is no internet
-     * (if the model is downloaded). Otherwise the free Google recogniser.
-     */
-    private fun chooseEngine(): RecognitionEngine {
-        val wantWhisper = settings.recognitionEngine == RecognitionEngine.WHISPER || !Net.online(ctx)
-        return if (wantWhisper && whisperReady()) RecognitionEngine.WHISPER else RecognitionEngine.ANDROID
+    private val netCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { viewModelScope.launch { refreshOffline() } }
+        override fun onLost(network: Network) { viewModelScope.launch { refreshOffline() } }
     }
 
     init {
         if (settings.saveHistory) history.addAll(store.loadHistory())
+        sync.myName = settings.deviceName.ifBlank { Build.MODEL ?: "VoxLink" }
+        refreshOffline()
+        runCatching {
+            (ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                .registerDefaultNetworkCallback(netCallback)
+        }
         loadVoices()
     }
 
     fun other(l: Lang): Lang = if (l == settings.me) settings.other else settings.me
 
+    private fun refreshOffline() {
+        val was = offlineNow
+        offlineNow = settings.forceOffline || !Net.online(ctx)
+        if (was != offlineNow) {
+            toast = if (offlineNow) "Modo offline: ${listenLang.label} → ${other(listenLang).label}. Use \"Trocar\" para inverter."
+            else "Internet de volta — modo online"
+            if (sessionActive && !paused && !micPausedForTts) {
+                restartJob?.cancel()
+                speech.cancel()
+                restartSoon(300)
+            }
+        }
+    }
+
+    /** In offline and two-phone modes the language is fixed (no detection, no automatic switching). */
+    private val fixedLanguage: Boolean get() = offlineNow || syncConnected
+
     // ================= Session control =================
 
     fun startSession() {
-        if (settings.recognitionEngine == RecognitionEngine.WHISPER && !whisperReady()) {
-            toast = "Baixe o modelo Whisper offline nas configurações. Usando o reconhecimento do Google por enquanto."
-        }
-        if (chooseEngine() == RecognitionEngine.ANDROID && !speech.available) {
+        refreshOffline()
+        if (!speech.available) {
             toast = "Reconhecimento de voz indisponível. Instale/atualize o app Google."
             status = "Reconhecimento de voz indisponível"
             return
@@ -147,6 +165,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         sessionActive = true
         paused = false
         consecutiveErrors = 0
+        if (syncConnected) listenLang = settings.me
         if (listenLang != settings.me && listenLang != settings.other) listenLang = settings.me
         startListening()
     }
@@ -156,7 +175,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         sessionActive = false
         paused = false
         restartJob?.cancel()
-        cancelSpeech()
+        speech.cancel()
         listening = false
         partial = ""
         rms = 0f
@@ -169,7 +188,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         paused = !paused
         if (paused) {
             restartJob?.cancel()
-            cancelSpeech()
+            speech.cancel()
             listening = false
             rms = 0f
             status = "Escuta pausada"
@@ -182,33 +201,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (sessionActive && !paused) togglePause()
     }
 
-    /** Force which language is expected next (tap on a language chip). */
+    /** Choose which language is spoken next (chip tap / face-to-face half / offline direction). */
     fun listenFor(l: Lang) {
+        if (syncConnected && l != settings.me) {
+            toast = "Com dois celulares, cada um ouve só o seu dono (${settings.me.label})."
+            return
+        }
         listenLang = l
         if (sessionActive && !paused && !micPausedForTts) {
             restartJob?.cancel()
-            cancelSpeech()
+            speech.cancel()
             startListening()
         }
     }
 
+    /** Offline: invert the direction (Português → 中文  ⇄  中文 → Português). */
+    fun swapDirection() {
+        val next = other(listenLang)
+        listenFor(next)
+        toast = "Agora: ${next.flag} ${next.label} → ${other(next).flag} ${other(next).label}"
+    }
+
     private fun startListening() {
         if (!sessionActive || paused || micPausedForTts) return
+        if (syncConnected) listenLang = settings.me
         recLang = listenLang
-        val silence = (settings.endPause * 1000).toLong()
-        val engine = chooseEngine()
-        val next: SpeechEngine = if (engine == RecognitionEngine.WHISPER) whisper else speech
-        if (next !== activeSpeech) activeSpeech.cancel()
-        activeSpeech = next
-        autoDetect = engine == RecognitionEngine.WHISPER
-        speech.silenceMs = silence
-        speech.preferOffline = !Net.online(ctx)
-        whisper.silenceMs = silence
-        whisper.model = settings.whisperModel
-        whisper.candidates = (listOf(settings.me, settings.other) + Lang.entries).distinct()
-        activeSpeech.start(recLang, listOf(other(recLang)))
+        speech.silenceMs = (settings.endPause * 1000).toLong()
+        speech.preferOffline = offlineNow
+        speech.start(recLang, if (fixedLanguage) emptyList() else listOf(other(recLang)))
         listening = true
-        status = if (autoDetect) "Ouvindo · 🌐 idioma automático (offline)" else "Ouvindo ${recLang.flag} ${recLang.label}…"
+        status = when {
+            syncConnected -> "Ouvindo você (${recLang.flag}) → enviando para ${partnerName ?: "o outro celular"}"
+            offlineNow -> "Offline · ${recLang.flag} ${recLang.label} → ${other(recLang).flag} ${other(recLang).label}"
+            else -> "Ouvindo ${recLang.flag} ${recLang.label}…"
+        }
     }
 
     private fun restartSoon(ms: Long = 250) {
@@ -222,12 +248,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     // ================= Recognizer callbacks =================
 
     override fun onReady() {
-        if (listening) status = if (autoDetect) "Ouvindo · 🌐 idioma automático — fale naturalmente"
-        else "Ouvindo ${recLang.flag} ${recLang.label}… fale naturalmente"
+        if (listening && !syncConnected && !offlineNow) status = "Ouvindo ${recLang.flag} ${recLang.label}… fale naturalmente"
     }
 
     override fun onSpeechStart() {
-        flushJob?.cancel() // speaker is continuing: keep waiting
+        flushJob?.cancel()
         status = "Captando fala…"
     }
 
@@ -236,8 +261,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     override fun onPartial(text: String) {
-        flushJob?.cancel() // speaker is continuing: keep waiting
+        flushJob?.cancel()
         partial = text
+        if (syncConnected) {
+            val now = System.currentTimeMillis()
+            if (now - lastPartialSent > 350) {
+                lastPartialSent = now
+                sync.send(JSONObject().put("t", "partial").put("text", joinSentences(pendingText, text)).put("from", recLang.code))
+            }
+        }
     }
 
     override fun onFinal(text: String, detectedLanguage: String?) {
@@ -247,16 +279,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         val t = text.trim()
         partial = ""
         if (t.isNotEmpty()) {
-            val det = Lang.fromCode(detectedLanguage)
-            // A different language means a different speaker: translate what we had first.
-            if (pendingText.isNotBlank() && det != null && pendingDetected != null && det != pendingDetected) flushNow()
-            if (pendingText.isBlank()) {
-                pendingHeard = recLang
-                pendingDetected = det
-            }
+            if (pendingText.isBlank()) pendingHeard = recLang
             pendingText = joinSentences(pendingText, t)
-            // Whisper already waited for the pause itself; the Google recogniser cuts on short pauses.
-            scheduleFlush(if (autoDetect) 250L else (settings.endPause * 1000).toLong())
+            scheduleFlush()
         }
         restartSoon(100)
     }
@@ -277,8 +302,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (text.isEmpty()) return
         pendingText = ""
         val heard = pendingHeard
-        val det = pendingDetected
-        viewModelScope.launch { processLock.withLock { process(text, heard, det) } }
+        viewModelScope.launch { processLock.withLock { process(text, heard) } }
     }
 
     private fun joinSentences(a: String, b: String): String {
@@ -304,20 +328,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                 return
             }
             12, 13, 14 -> {
+                if (offlineNow) {
+                    toast = "Reconhecimento offline de ${recLang.label} não instalado. Vá em ⚙ → Preparar modo offline."
+                    speech.downloadOfflinePack(recLang)
+                }
                 speech.advanced = false
-                restartSoon(200)
-                return
+                restartSoon(800)
             }
             SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                 partial = ""
                 if (pendingText.isNotBlank() && flushJob?.isActive != true) scheduleFlush(400)
                 restartSoon(150)
-                return
-            }
-            SpeechInput.WHISPER_NO_MODEL, SpeechInput.WHISPER_ERROR -> {
-                toast = "Whisper offline indisponível (${SpeechInput.errorText(code)}). Usando o Google."
-                update { it.copy(recognitionEngine = RecognitionEngine.ANDROID) }
-                restartSoon(300)
                 return
             }
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
@@ -326,6 +347,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
             }
             else -> {
                 if (code == SpeechRecognizer.ERROR_CLIENT && consecutiveErrors >= 2) speech.advanced = false
+                if (code == SpeechRecognizer.ERROR_NETWORK || code == SpeechRecognizer.ERROR_NETWORK_TIMEOUT) refreshOffline()
                 status = SpeechInput.errorText(code)
                 restartSoon(if (code == SpeechRecognizer.ERROR_NETWORK) 1500 else 500)
             }
@@ -334,28 +356,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (consecutiveErrors > 10) {
             stopSession()
             status = SpeechInput.errorText(code)
-            toast = "Reconhecimento de voz falhou repetidamente. Verifique internet e o app Google."
+            toast = "Reconhecimento de voz falhou repetidamente. Verifique o app Google e os pacotes offline."
         }
     }
 
     // ================= Translation =================
 
-    private suspend fun process(text: String, heard: Lang, recDetected: Lang?) {
+    private suspend fun process(text: String, heard: Lang) {
         val now = System.currentTimeMillis()
         if (text.equals(lastFinalText, ignoreCase = true) && now - lastFinalAt < 5000) return
         lastFinalText = text
         lastFinalAt = now
 
         val s = settings
-        val src = detector.detect(text, heard, recDetected, setOf(s.me, s.other))
-        val tgt = when (src) {
-            s.me -> s.other
-            s.other -> s.me
-            else -> if (heard == s.me) s.other else s.me
-        }
+        val src = if (fixedLanguage) heard else detector.detect(text, heard, null, setOf(s.me, s.other))
+        val tgt = when {
+            syncConnected -> partnerLang ?: s.other
+            src == s.me -> s.other
+            src == s.other -> s.me
+            heard == s.me -> s.other
+            else -> s.me
+        }.let { if (it == src) other(src) else it }
+
         lastOriginal = text
         lastFrom = src
         lastOriginalPinyin = null
+        remotePartial = ""
 
         translating = true
         status = "Traduzindo ${src.flag} → ${tgt.flag}…"
@@ -364,45 +390,60 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         translating = false
 
         if (result == null) {
-            lastTranslation = "Tradução indisponível — verifique a internet ou baixe os pacotes offline nas configurações."
+            lastTranslation = if (offlineNow) "Tradução offline indisponível — ⚙ → Preparar modo offline (baixar pacotes)."
+            else "Tradução indisponível — verifique a internet."
             lastTo = tgt
             lastProvider = "erro"
             status = "Falha na tradução"
             return
         }
         val out = result.text
-        val provider = result.provider
         val srcPy = if (src == Lang.ZH) (result.sourceRoman?.takeIf { prepared == text } ?: Pinyin.of(text)) else null
         val dstPy = if (tgt == Lang.ZH) (result.targetRoman ?: Pinyin.of(out)) else null
         lastTranslation = out
         lastTranslationPinyin = dstPy
         lastOriginalPinyin = srcPy
         lastTo = tgt
-        lastProvider = provider
-        history.add(0, Entry(now, text, src, out, tgt, now, provider, srcPy, dstPy))
-        if (history.size > 300) history.removeRange(300, history.size)
-        if (s.saveHistory) store.saveHistory(history)
+        lastProvider = result.provider
+        addHistory(Entry(now, text, src, out, tgt, now, result.provider, srcPy, dstPy))
 
-        // The other person will answer in the language we just produced.
-        if (s.autoSwitch && sessionActive) listenLang = tgt
+        if (syncConnected) {
+            // Two phones: the other phone speaks the translation to its owner.
+            sync.send(
+                JSONObject().put("t", "seg").put("id", now)
+                    .put("text", text).put("from", src.code)
+                    .put("translation", out).put("to", tgt.code)
+                    .put("op", srcPy ?: "").put("tp", dstPy ?: "")
+            )
+            status = "Enviado para ${partnerName ?: "o outro celular"} ✓"
+            return
+        }
+
+        if (s.autoSwitch && sessionActive && !fixedLanguage) listenLang = tgt
 
         if (s.autoSpeak && !muted) {
             enqueueSpeech(out, tgt)
         } else {
             status = "Tradução pronta"
-            if (s.autoSwitch && sessionActive && !paused && listenLang != recLang) {
+            if (sessionActive && !paused && listenLang != recLang) {
                 restartJob?.cancel()
-                cancelSpeech()
+                speech.cancel()
                 restartSoon(150)
             }
         }
+    }
+
+    private fun addHistory(e: Entry) {
+        history.add(0, e)
+        if (history.size > 300) history.removeRange(300, history.size)
+        if (settings.saveHistory) store.saveHistory(history)
     }
 
     private data class TrResult(val text: String, val provider: String, val sourceRoman: String? = null, val targetRoman: String? = null)
 
     private suspend fun translate(text: String, from: Lang, to: Lang): TrResult? {
         if (from == to) return TrResult(text, "—")
-        if (settings.translationMode == TranslationMode.ONLINE_THEN_OFFLINE && Net.online(ctx)) {
+        if (!offlineNow && settings.translationMode == TranslationMode.ONLINE_THEN_OFFLINE) {
             try {
                 val t = withTimeout(9000) { online.translateFull(text, from, to) }
                 return TrResult(t.text, "Online", t.sourceRoman, t.targetRoman)
@@ -418,39 +459,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         }
     }
 
-    fun downloadWhisper(m: WhisperModel = settings.whisperModel) {
-        if (whisperProgress != null) return
-        if (!com.voxlink.ai.speech.WhisperLib.loaded) {
-            toast = "Motor Whisper não disponível neste aparelho (precisa de processador 64-bit)."
-            return
-        }
+    /** Downloads everything the offline mode needs: translation packs + offline recognition packs. */
+    fun prepareOffline() {
         viewModelScope.launch {
-            whisperProgress = 0
+            toast = "Baixando pacotes offline de tradução (≈30 MB por idioma)…"
             try {
-                WhisperModels.download(ctx, m) { whisperProgress = it }
-                whisperReadyTick++
-                toast = "Modelo Whisper pronto — reconhecimento offline ativado"
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                toast = "Falha ao baixar o modelo: ${e.message}"
-            } finally {
-                whisperProgress = null
-            }
-        }
-    }
-
-    fun deleteWhisper(m: WhisperModel) {
-        WhisperModels.file(ctx, m).delete()
-        whisperReadyTick++
-    }
-
-    fun downloadOfflinePacks() {
-        viewModelScope.launch {
-            toast = "Baixando pacotes offline (≈30 MB por idioma)…"
-            try {
-                val langs = Lang.entries
-                for (a in langs) for (b in langs) if (a != b && a.ordinal < b.ordinal) offline.download(a, b)
-                toast = "Pacotes offline prontos: PT · EN · 中文"
+                val langs = listOf(settings.me, settings.other).distinct()
+                for (a in Lang.entries) for (b in Lang.entries) {
+                    if (a != b && a.ordinal < b.ordinal && (a in langs || b in langs)) offline.download(a, b)
+                }
+                val rec = langs.map { speech.downloadOfflinePack(it) }
+                toast = if (rec.all { it }) "Pacotes offline prontos. O reconhecimento offline está sendo instalado pelo Android."
+                else "Tradução offline pronta. Instale o reconhecimento offline em Configurações do Android → Idioma → Reconhecimento de fala."
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 toast = "Falha ao baixar pacotes: ${e.message}"
@@ -473,13 +493,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                 while (playQueue.isNotEmpty()) {
                     val (t, l) = playQueue.removeFirst()
                     val device = outputFor(l)
-                    // Translation going to MY headphones: the mic can keep listening (full duplex).
-                    // Going to the loudspeaker: pause the mic so we never translate our own voice.
+                    // To MY headphones: keep listening (full duplex). To the loudspeaker: pause the mic.
                     if (!router.isHeadphones(device) && !micPausedForTts) {
                         micPausedForTts = true
                         restartJob?.cancel()
                         flushJob?.cancel()
-                        cancelSpeech()
+                        speech.cancel()
                         listening = false
                         rms = 0f
                     }
@@ -498,19 +517,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     /** With headphones and split audio on: my language → headphones, the other's → loudspeaker. */
-    private fun outputFor(l: Lang): android.media.AudioDeviceInfo? {
+    private fun outputFor(l: Lang): AudioDeviceInfo? {
         if (!settings.splitAudio) return null
         val phones = router.headphones() ?: return null
         return if (l == settings.me) phones else router.speaker()
     }
 
-    private suspend fun speakOne(text: String, lang: Lang, device: android.media.AudioDeviceInfo?) {
-        val s = settings
+    private suspend fun speakOne(text: String, lang: Lang, device: AudioDeviceInfo?) {
         try {
-            androidTts.speak(text, lang, s, device)
+            androidTts.speak(text, lang, settings, device)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (device != null) runCatching { androidTts.speak(text, lang, s, null) }
+            if (device != null) runCatching { androidTts.speak(text, lang, settings, null) }
             else toast = "Erro na voz: ${e.message}"
         }
     }
@@ -546,6 +564,92 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     fun testVoice(lang: Lang) = enqueueSpeech(SAMPLE_PHRASES.getValue(lang), lang, force = true)
 
+    // ================= Two-phone sync =================
+
+    fun syncHostWifi() = sync.hostWifi()
+    fun syncDiscoverWifi() = sync.discoverWifi()
+    fun syncJoinWifi(host: String) = sync.joinWifi(host)
+    fun syncStartWifiDirect() = sync.startWifiDirect()
+    fun syncHostBluetooth() = sync.hostBluetooth()
+    fun syncListBluetooth() = sync.listBluetooth()
+    fun syncStop() = sync.stop()
+    fun syncLocalIp(): String = sync.localIp()
+
+    fun syncConnectPeer(p: Peer) = when (p.transport) {
+        SyncTransport.WIFI -> sync.joinWifi(p.id)
+        SyncTransport.WIFI_DIRECT -> sync.connectWifiDirect(p)
+        SyncTransport.BLUETOOTH -> sync.joinBluetooth(p)
+    }
+
+    override fun onSyncState(state: SyncState, info: String) {
+        val wasConnected = syncState == SyncState.CONNECTED
+        syncState = state
+        syncInfo = info
+        if (state == SyncState.CONNECTED) {
+            sync.send(JSONObject().put("t", "hello").put("name", sync.myName).put("lang", settings.me.code))
+            listenLang = settings.me
+            if (sessionActive && !paused && !micPausedForTts) {
+                speech.cancel()
+                restartSoon(300)
+            }
+        } else if (wasConnected) {
+            partnerName = null
+            partnerLang = null
+            remotePartial = ""
+            toast = "Celulares desconectados: $info"
+        }
+    }
+
+    override fun onPeers(peers: List<Peer>) {
+        syncPeers = peers
+    }
+
+    override fun onSyncMessage(msg: JSONObject) {
+        when (msg.optString("t")) {
+            "hello" -> {
+                partnerName = msg.optString("name").ifBlank { "outro celular" }
+                val pl = Lang.fromCode(msg.optString("lang"))
+                partnerLang = pl
+                if (pl != null && pl != settings.me && pl != settings.other) update { it.copy(other = pl) }
+                toast = "Conectado a $partnerName (${pl?.flag ?: ""} ${pl?.label ?: ""})"
+                if (!sessionActive) status = "Conectado a $partnerName — toque no microfone para começar"
+            }
+            "partial" -> remotePartial = msg.optString("text")
+            "seg" -> {
+                val from = Lang.fromCode(msg.optString("from")) ?: partnerLang ?: settings.other
+                val to = Lang.fromCode(msg.optString("to")) ?: settings.me
+                val text = msg.optString("text")
+                val translation = msg.optString("translation")
+                remotePartial = ""
+                viewModelScope.launch { receiveSegment(text, from, translation, to, msg.optString("op"), msg.optString("tp")) }
+            }
+            "bye" -> toast = "${partnerName ?: "O outro celular"} encerrou a conexão"
+        }
+    }
+
+    private suspend fun receiveSegment(text: String, from: Lang, translation: String, to: Lang, op: String, tp: String) {
+        var out = translation
+        var dst = to
+        var dstPy = tp.ifBlank { null }
+        if (out.isBlank() || dst != settings.me) {
+            // Sender could not translate into my language: do it here.
+            dst = settings.me
+            val r = translate(text, from, dst) ?: return
+            out = r.text
+            dstPy = if (dst == Lang.ZH) r.targetRoman ?: Pinyin.of(out) else null
+        }
+        val now = System.currentTimeMillis()
+        lastOriginal = text
+        lastFrom = from
+        lastOriginalPinyin = op.ifBlank { null } ?: if (from == Lang.ZH) Pinyin.of(text) else null
+        lastTranslation = out
+        lastTo = dst
+        lastTranslationPinyin = dstPy ?: if (dst == Lang.ZH) Pinyin.of(out) else null
+        lastProvider = "de ${partnerName ?: "outro celular"}"
+        addHistory(Entry(now, text, from, out, dst, now, lastProvider, lastOriginalPinyin, lastTranslationPinyin))
+        if (settings.autoSpeak && !muted) enqueueSpeech(out, dst) else status = "Recebido de ${partnerName ?: "outro celular"}"
+    }
+
     // ================= Settings & history =================
 
     fun update(transform: (AppSettings) -> AppSettings) {
@@ -560,16 +664,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
             androidTts = AndroidVoiceEngine(ctx, s.androidEngine)
             loadVoices()
         }
+        if (old.deviceName != s.deviceName) sync.myName = s.deviceName.ifBlank { Build.MODEL ?: "VoxLink" }
         if (old.me != s.me || old.other != s.other) {
             if (listenLang != s.me && listenLang != s.other) listenFor(s.me)
+            if (syncConnected && old.me != s.me) sync.send(JSONObject().put("t", "hello").put("name", sync.myName).put("lang", s.me.code))
         }
-        if (old.recognitionEngine != s.recognitionEngine || old.whisperModel != s.whisperModel) {
-            if (sessionActive && !paused && !micPausedForTts) {
-                restartJob?.cancel()
-                cancelSpeech()
-                restartSoon(400)
-            }
-        }
+        if (old.forceOffline != s.forceOffline) refreshOffline()
         if (old.saveHistory != s.saveHistory) {
             if (s.saveHistory) store.saveHistory(history) else store.clearHistory()
         }
@@ -583,8 +683,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         toast = "Histórico apagado"
     }
 
-    fun exportText(): String = history.reversed().joinToString("\n\n") {
-        "${it.from.flag} ${it.original}\n${it.to.flag} ${it.translation}"
+    fun exportText(): String = history.reversed().joinToString("\n\n") { e ->
+        buildString {
+            append("${e.from.flag} ${e.original}")
+            e.originalPinyin?.let { append("\n   $it") }
+            append("\n${e.to.flag} ${e.translation}")
+            e.translationPinyin?.let { append("\n   $it") }
+        }
     }
 
     fun loadVoices() {
@@ -597,8 +702,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     val glossarySize: Int get() = glossary.size
 
     override fun onCleared() {
+        runCatching {
+            (ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                .unregisterNetworkCallback(netCallback)
+        }
+        sync.shutdown()
         speech.destroy()
-        whisper.destroy()
         androidTts.shutdown()
         offline.close()
     }

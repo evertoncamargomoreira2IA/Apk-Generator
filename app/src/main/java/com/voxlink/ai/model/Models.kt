@@ -50,16 +50,6 @@ data class Entry(
     val translationPinyin: String? = null,
 )
 
-/** ANDROID = Google recognizer (online, turn-based language switching); WHISPER = offline, open source, automatic language. */
-enum class RecognitionEngine { ANDROID, WHISPER }
-
-/** Open-source Whisper models (whisper.cpp, MIT), downloaded once from Hugging Face. */
-enum class WhisperModel(val file: String, val label: String, val sizeMb: Int) {
-    BASE("ggml-base-q5_1.bin", "Base — rápido", 57),
-    SMALL("ggml-small-q5_1.bin", "Small — mais preciso (mais lento)", 181),
-}
-enum class TranslationMode { ONLINE_THEN_OFFLINE, OFFLINE_ONLY }
-
 data class AppSettings(
     val me: Lang = Lang.PT,
     val other: Lang = Lang.ZH,
@@ -75,11 +65,13 @@ data class AppSettings(
     val glossary: String = DEFAULT_GLOSSARY,
     val saveHistory: Boolean = false,
     val keepScreenOn: Boolean = true,
-    val recognitionEngine: RecognitionEngine = RecognitionEngine.ANDROID,
+    /** Force offline mode (also automatic when there is no internet). */
+    val forceOffline: Boolean = false,
     val showPinyin: Boolean = true,
+    /** Name shown to the other phone in sync mode. */
+    val deviceName: String = "",
     /** Silence (seconds) that marks the end of what a person is saying. */
     val endPause: Float = 1.5f,
-    val whisperModel: WhisperModel = WhisperModel.BASE,
     /** With headphones connected: my language → headphones, the other person's language → loudspeaker. */
     val splitAudio: Boolean = true,
 )

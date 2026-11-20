@@ -40,14 +40,33 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) : SpeechE
     /** Silence that ends an utterance, in ms (many recognizers treat this only as a hint). */
     var silenceMs = 1500L
 
-    /** Use the on-device Google model when there is no internet. */
+    /** Offline mode: use the on-device recogniser (Android 12+) or ask Google for its offline model. */
     var preferOffline = false
+    private var usingOnDevice = false
 
-    val available: Boolean get() = SpeechRecognizer.isRecognitionAvailable(ctx)
+    private fun onDeviceAvailable(): Boolean =
+        Build.VERSION.SDK_INT >= 31 && runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx) }.getOrDefault(false)
+
+    /** Ask Android to download the offline recognition pack for a language (Android 13+). */
+    fun downloadOfflinePack(lang: Lang): Boolean {
+        if (Build.VERSION.SDK_INT < 33 || !onDeviceAvailable()) return false
+        return runCatching {
+            val r = SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
+            r.triggerModelDownload(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang.bcp47))
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ runCatching { r.destroy() } }, 5000)
+            true
+        }.getOrDefault(false)
+    }
+
+    val available: Boolean get() = SpeechRecognizer.isRecognitionAvailable(ctx) || onDeviceAvailable()
 
     override fun start(lang: Lang, alternatives: List<Lang>) {
+        val wantOnDevice = preferOffline && onDeviceAvailable()
+        if (rec != null && wantOnDevice != usingOnDevice) destroy()
         if (rec == null) {
-            rec = SpeechRecognizer.createSpeechRecognizer(ctx).also { it.setRecognitionListener(listener) }
+            rec = (if (wantOnDevice && Build.VERSION.SDK_INT >= 31) SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
+            else SpeechRecognizer.createSpeechRecognizer(ctx)).also { it.setRecognitionListener(listener) }
+            usingOnDevice = wantOnDevice
         }
         detected = null
         val all = ArrayList((listOf(lang) + alternatives).distinct().map { it.bcp47 })
@@ -109,8 +128,6 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) : SpeechE
     }
 
     companion object {
-        const val WHISPER_ERROR = 100
-        const val WHISPER_NO_MODEL = 102
 
         fun errorText(code: Int): String = when (code) {
             SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Erro de rede no reconhecimento"
@@ -119,8 +136,6 @@ class SpeechInput(private val ctx: Context, private val cb: Callbacks) : SpeechE
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Sem permissão de microfone"
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Reconhecedor ocupado"
             12, 13 -> "Idioma não disponível no reconhecedor"
-            WHISPER_NO_MODEL -> "Modelo Whisper offline não baixado"
-            WHISPER_ERROR -> "Erro no Whisper offline"
             else -> "Erro de reconhecimento ($code)"
         }
     }

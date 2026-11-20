@@ -6,9 +6,7 @@ import android.net.NetworkCapabilities
 import com.voxlink.ai.model.AppSettings
 import com.voxlink.ai.model.Entry
 import com.voxlink.ai.model.Lang
-import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.TranslationMode
-import com.voxlink.ai.model.WhisperModel
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -34,10 +32,10 @@ class SettingsStore(context: Context) {
             glossary = p.getString("glossary", d.glossary) ?: d.glossary,
             saveHistory = p.getBoolean("saveHistory", d.saveHistory),
             keepScreenOn = p.getBoolean("keepScreenOn", d.keepScreenOn),
-            recognitionEngine = runCatching { RecognitionEngine.valueOf(p.getString("recognitionEngine", null)!!) }.getOrDefault(d.recognitionEngine),
+            forceOffline = p.getBoolean("forceOffline", d.forceOffline),
+            deviceName = p.getString("deviceName", d.deviceName) ?: "",
             showPinyin = p.getBoolean("showPinyin", d.showPinyin),
             endPause = p.getFloat("endPause", d.endPause),
-            whisperModel = runCatching { WhisperModel.valueOf(p.getString("whisperModel", null)!!) }.getOrDefault(d.whisperModel),
             splitAudio = p.getBoolean("splitAudio", d.splitAudio),
         )
     }
@@ -58,10 +56,10 @@ class SettingsStore(context: Context) {
             .putString("glossary", s.glossary)
             .putBoolean("saveHistory", s.saveHistory)
             .putBoolean("keepScreenOn", s.keepScreenOn)
-            .putString("recognitionEngine", s.recognitionEngine.name)
+            .putBoolean("forceOffline", s.forceOffline)
+            .putString("deviceName", s.deviceName)
             .putBoolean("showPinyin", s.showPinyin)
             .putFloat("endPause", s.endPause)
-            .putString("whisperModel", s.whisperModel.name)
             .putBoolean("splitAudio", s.splitAudio)
             .apply()
     }
