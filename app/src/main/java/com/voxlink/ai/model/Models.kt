@@ -50,6 +50,8 @@ data class Entry(
     val translationPinyin: String? = null,
 )
 
+enum class TranslationMode { ONLINE_THEN_OFFLINE, OFFLINE_ONLY }
+
 data class AppSettings(
     val me: Lang = Lang.PT,
     val other: Lang = Lang.ZH,
