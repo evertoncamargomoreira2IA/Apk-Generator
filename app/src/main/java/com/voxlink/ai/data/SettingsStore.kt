@@ -8,7 +8,7 @@ import com.voxlink.ai.model.Entry
 import com.voxlink.ai.model.Lang
 import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.TranslationMode
-import com.voxlink.ai.model.VoiceProvider
+import com.voxlink.ai.model.WhisperModel
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -25,14 +25,10 @@ class SettingsStore(context: Context) {
             rate = p.getFloat("rate", d.rate),
             pitch = p.getFloat("pitch", d.pitch),
             volume = p.getFloat("volume", d.volume),
-            voiceProvider = runCatching { VoiceProvider.valueOf(p.getString("voiceProvider", null)!!) }.getOrDefault(d.voiceProvider),
             androidEngine = p.getString("androidEngine", d.androidEngine) ?: "",
             androidVoices = (p.getString("androidVoices", "") ?: "").split(";")
                 .mapNotNull { s -> s.split("=", limit = 2).takeIf { it.size == 2 && it[1].isNotBlank() }?.let { it[0] to it[1] } }
                 .toMap(),
-            azureKey = p.getString("azureKey", d.azureKey) ?: "",
-            azureRegion = p.getString("azureRegion", d.azureRegion) ?: d.azureRegion,
-            azureFemale = p.getBoolean("azureFemale", d.azureFemale),
             translationMode = runCatching { TranslationMode.valueOf(p.getString("translationMode", null)!!) }.getOrDefault(d.translationMode),
             technicalMode = p.getBoolean("technicalMode", d.technicalMode),
             glossary = p.getString("glossary", d.glossary) ?: d.glossary,
@@ -41,6 +37,8 @@ class SettingsStore(context: Context) {
             recognitionEngine = runCatching { RecognitionEngine.valueOf(p.getString("recognitionEngine", null)!!) }.getOrDefault(d.recognitionEngine),
             showPinyin = p.getBoolean("showPinyin", d.showPinyin),
             endPause = p.getFloat("endPause", d.endPause),
+            whisperModel = runCatching { WhisperModel.valueOf(p.getString("whisperModel", null)!!) }.getOrDefault(d.whisperModel),
+            splitAudio = p.getBoolean("splitAudio", d.splitAudio),
         )
     }
 
@@ -53,12 +51,8 @@ class SettingsStore(context: Context) {
             .putFloat("rate", s.rate)
             .putFloat("pitch", s.pitch)
             .putFloat("volume", s.volume)
-            .putString("voiceProvider", s.voiceProvider.name)
             .putString("androidEngine", s.androidEngine)
             .putString("androidVoices", s.androidVoices.entries.joinToString(";") { "${it.key}=${it.value}" })
-            .putString("azureKey", s.azureKey)
-            .putString("azureRegion", s.azureRegion)
-            .putBoolean("azureFemale", s.azureFemale)
             .putString("translationMode", s.translationMode.name)
             .putBoolean("technicalMode", s.technicalMode)
             .putString("glossary", s.glossary)
@@ -67,6 +61,8 @@ class SettingsStore(context: Context) {
             .putString("recognitionEngine", s.recognitionEngine.name)
             .putBoolean("showPinyin", s.showPinyin)
             .putFloat("endPause", s.endPause)
+            .putString("whisperModel", s.whisperModel.name)
+            .putBoolean("splitAudio", s.splitAudio)
             .apply()
     }
 

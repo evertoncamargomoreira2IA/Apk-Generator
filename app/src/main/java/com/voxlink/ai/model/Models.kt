@@ -50,10 +50,14 @@ data class Entry(
     val translationPinyin: String? = null,
 )
 
-enum class VoiceProvider { ANDROID, AZURE }
+/** ANDROID = Google recognizer (online, turn-based language switching); WHISPER = offline, open source, automatic language. */
+enum class RecognitionEngine { ANDROID, WHISPER }
 
-/** ANDROID = Google recognizer (turn-based language switching); AZURE = continuous automatic language identification. */
-enum class RecognitionEngine { ANDROID, AZURE }
+/** Open-source Whisper models (whisper.cpp, MIT), downloaded once from Hugging Face. */
+enum class WhisperModel(val file: String, val label: String, val sizeMb: Int) {
+    BASE("ggml-base-q5_1.bin", "Base — rápido", 57),
+    SMALL("ggml-small-q5_1.bin", "Small — mais preciso (mais lento)", 181),
+}
 enum class TranslationMode { ONLINE_THEN_OFFLINE, OFFLINE_ONLY }
 
 data class AppSettings(
@@ -64,12 +68,8 @@ data class AppSettings(
     val rate: Float = 1.0f,
     val pitch: Float = 1.0f,
     val volume: Float = 1.0f,
-    val voiceProvider: VoiceProvider = VoiceProvider.ANDROID,
     val androidEngine: String = "",
     val androidVoices: Map<String, String> = emptyMap(),
-    val azureKey: String = "",
-    val azureRegion: String = "brazilsouth",
-    val azureFemale: Boolean = true,
     val translationMode: TranslationMode = TranslationMode.ONLINE_THEN_OFFLINE,
     val technicalMode: Boolean = true,
     val glossary: String = DEFAULT_GLOSSARY,
@@ -79,6 +79,9 @@ data class AppSettings(
     val showPinyin: Boolean = true,
     /** Silence (seconds) that marks the end of what a person is saying. */
     val endPause: Float = 1.5f,
+    val whisperModel: WhisperModel = WhisperModel.BASE,
+    /** With headphones connected: my language → headphones, the other person's language → loudspeaker. */
+    val splitAudio: Boolean = true,
 )
 
 val SAMPLE_PHRASES = mapOf(

@@ -71,7 +71,6 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.voxlink.ai.MainViewModel
@@ -79,7 +78,7 @@ import com.voxlink.ai.model.Lang
 import com.voxlink.ai.model.Pinyin
 import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.TranslationMode
-import com.voxlink.ai.model.VoiceProvider
+import com.voxlink.ai.model.WhisperModel
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -176,7 +175,7 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     Box(
                         Modifier.clip(RoundedCornerShape(14.dp)).background(Green.copy(alpha = .15f))
                             .border(1.dp, Green, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) { Text("🌐 Idioma automático · PT · EN · 中文", color = Green, fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
+                    ) { Text("🌐 Automático (Whisper) · PT · EN · 中文", color = Green, fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
                 } else listOf(s.me, s.other).forEach { l ->
                     val sel = vm.listenLang == l
                     Box(
@@ -246,8 +245,8 @@ private fun MainScreen(vm: MainViewModel, onMic: () -> Unit, openSettings: () ->
                     }
                 }
                 if (vm.lastProvider.isNotEmpty()) {
-                    val voice = if (s.voiceProvider == VoiceProvider.AZURE && s.azureKey.isNotBlank()) "Azure Neural" else "voz neural do Android"
-                    Text("Tradução ${vm.lastProvider} · $voice" + if (s.technicalMode) " · modo técnico" else "", color = Muted, fontSize = 12.sp)
+                    val voice = if (vm.autoDetect) "Whisper offline" else "Google"
+                    Text("Reconhecimento $voice · tradução ${vm.lastProvider}" + if (s.technicalMode) " · modo técnico" else "", color = Muted, fontSize = 12.sp)
                 }
             }
         }
@@ -501,75 +500,51 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
     val ctx = LocalContext.current
     val s = vm.settings
     var glossaryText by remember { mutableStateOf(s.glossary) }
-    var azureKey by remember { mutableStateOf(s.azureKey) }
-    var azureRegion by remember { mutableStateOf(s.azureRegion) }
-
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Configurações", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = White, modifier = Modifier.weight(1f))
             Button(onClick = {
-                vm.update { it.copy(glossary = glossaryText, azureKey = azureKey.trim(), azureRegion = azureRegion.trim()) }
+                vm.update { it.copy(glossary = glossaryText) }
                 close()
             }) { Text("Concluir") }
         }
+        Hint("Tudo grátis, sem chave nem assinatura: Whisper (open source), tradução Google online ou ML Kit no aparelho, vozes do próprio Android.")
 
         Section("Reconhecimento de fala")
-        RadioRow("Android/Google (grátis) — idioma por turnos", s.recognitionEngine == RecognitionEngine.ANDROID) {
+        RadioRow("Google (online, grátis) — idioma por turnos", s.recognitionEngine == RecognitionEngine.ANDROID) {
             vm.update { it.copy(recognitionEngine = RecognitionEngine.ANDROID) }
         }
-        RadioRow("Azure — detecção automática do idioma", s.recognitionEngine == RecognitionEngine.AZURE) {
-            vm.update { it.copy(recognitionEngine = RecognitionEngine.AZURE) }
+        RadioRow("Whisper offline (open source) — idioma automático", s.recognitionEngine == RecognitionEngine.WHISPER) {
+            vm.update { it.copy(recognitionEngine = RecognitionEngine.WHISPER) }
+            if (!vm.whisperReady()) vm.downloadWhisper()
         }
         Hint(
-            if (s.recognitionEngine == RecognitionEngine.AZURE)
-                "Cada frase tem o idioma identificado sozinho (PT · EN · 中文), sem precisar tocar em nada. Usa a mesma chave Azure Speech da voz premium (abaixo)."
+            if (s.recognitionEngine == RecognitionEngine.WHISPER)
+                "Cada frase tem o idioma identificado sozinho (PT · EN · 中文), sem internet e sem tocar em nada. Leva 1–3 s para transcrever, conforme o celular."
             else
-                "O app ouve um idioma por vez e alterna após cada tradução. No Android 14+ também tenta detectar o idioma. Para detecção 100% automática, use o Azure."
+                "O Google ouve um idioma por vez e alterna após cada tradução. Sem internet, o app passa sozinho para o Whisper offline (se o modelo estiver baixado)."
         )
+        WhisperModelRow(vm)
         LabeledSlider("Pausa para considerar que terminou de falar", s.endPause, 0.6f..3.0f, "%.1f s") { v -> vm.update { it.copy(endPause = v) } }
         Hint("Aumente se o app estiver traduzindo antes de a pessoa terminar a frase.")
         SwitchRow("Mostrar pinyin no texto em chinês", s.showPinyin) { v -> vm.update { it.copy(showPinyin = v) } }
 
-        if (s.recognitionEngine == RecognitionEngine.AZURE || s.voiceProvider == VoiceProvider.AZURE) {
-            Section("Chave Azure Speech")
-            OutlinedTextField(value = azureKey, onValueChange = { azureKey = it }, label = { Text("Chave Azure Speech") },
-                visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = azureRegion, onValueChange = { azureRegion = it }, label = { Text("Região (ex.: brazilsouth, eastus)") },
-                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
-            Button(onClick = {
-                vm.update { it.copy(azureKey = azureKey.trim(), azureRegion = azureRegion.trim()) }
-                vm.toast = "Chave salva"
-            }, modifier = Modifier.padding(top = 6.dp)) { Text("Salvar chave") }
-            Hint("portal.azure.com → criar recurso \"Speech\" (camada gratuita F0) → Chaves e Ponto de extremidade. A chave fica só neste aparelho.")
-        }
-
         Section("Voz da tradução")
-        RadioRow("Voz neural do Android (Google, grátis)", s.voiceProvider == VoiceProvider.ANDROID) {
-            vm.update { it.copy(voiceProvider = VoiceProvider.ANDROID) }
+        EnginePicker(vm)
+        listOf(s.me, s.other).distinct().forEach { l -> VoicePicker(vm, l) }
+        Row {
+            OutlinedButton(onClick = {
+                runCatching { ctx.startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    .onFailure { runCatching { ctx.startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)) } }
+            }) { Text("Instalar vozes") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = { vm.loadVoices() }) { Text("Atualizar lista") }
         }
-        RadioRow("Azure Neural (premium, chave própria)", s.voiceProvider == VoiceProvider.AZURE) {
-            vm.update { it.copy(voiceProvider = VoiceProvider.AZURE) }
-        }
+        Hint("No app \"Serviços de voz do Google\", baixe as vozes Português (Brasil) e Chinês (Mandarim) para funcionar offline. As marcadas \"online\" são as mais naturais quando há internet.")
 
-        if (s.voiceProvider == VoiceProvider.ANDROID) {
-            EnginePicker(vm)
-            listOf(s.me, s.other).distinct().forEach { l -> VoicePicker(vm, l) }
-            Row {
-                OutlinedButton(onClick = {
-                    runCatching { ctx.startActivity(Intent("com.android.settings.TTS_SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                        .onFailure { runCatching { ctx.startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)) } }
-                }) { Text("Instalar vozes") }
-                Spacer(Modifier.width(8.dp))
-                OutlinedButton(onClick = { vm.loadVoices() }) { Text("Atualizar lista") }
-            }
-            Hint("Dica: no app \"Serviços de voz do Google\", baixe as vozes Português (Brasil) e Chinês (Mandarim). As vozes marcadas como \"online\" são as mais naturais.")
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
-                Text("Voz feminina", color = White, modifier = Modifier.weight(1f))
-                Switch(checked = s.azureFemale, onCheckedChange = { v -> vm.update { it.copy(azureFemale = v) } })
-            }
-            Hint("Vozes: Francisca/Antonio (PT-BR), Jenny/Guy (EN), Xiaoxiao/Yunxi (中文). A chave fica só neste aparelho. Se o Azure falhar, o app usa a voz do Android automaticamente.")
-        }
+        Section("Fone de ouvido")
+        SwitchRow("Fone para mim, alto-falante para o colega", s.splitAudio) { v -> vm.update { it.copy(splitAudio = v) } }
+        Hint("Com fone Bluetooth/com fio conectado: a tradução para o seu idioma toca só no seu fone (e o microfone continua ouvindo, sem espera); a tradução para o colega sai no alto-falante do celular.")
 
         Row(Modifier.padding(top = 8.dp)) {
             listOf(s.me, s.other).distinct().forEach { l ->
@@ -609,6 +584,33 @@ private fun SettingsScreen(vm: MainViewModel, close: () -> Unit) {
         OutlinedButton(onClick = { vm.clearHistory() }) { Text("Apagar histórico", color = Color(0xFFFF7A7A)) }
         Hint("O áudio vai apenas para o reconhecedor de voz do Android. Nada é gravado. O texto é enviado ao serviço de tradução online (ou fica no aparelho no modo offline).")
         Spacer(Modifier.height(30.dp))
+    }
+}
+
+@Composable
+private fun WhisperModelRow(vm: MainViewModel) {
+    val s = vm.settings
+    @Suppress("UNUSED_VARIABLE") val tick = vm.whisperReadyTick
+    Column(Modifier.padding(top = 6.dp)) {
+        Text("Modelo Whisper offline", color = Muted, fontSize = 13.sp)
+        WhisperModel.entries.forEach { m ->
+            val ready = vm.whisperReady(m)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = s.whisperModel == m, onClick = { vm.update { it.copy(whisperModel = m) } })
+                Column(Modifier.weight(1f)) {
+                    Text(m.label, color = White, fontSize = 14.sp)
+                    Text(if (ready) "✓ baixado" else "${m.sizeMb} MB — baixar uma vez (Wi-Fi)", color = if (ready) Green else Muted, fontSize = 11.sp)
+                }
+                if (ready) TextButton(onClick = { vm.deleteWhisper(m) }) { Text("Apagar", color = Color(0xFFFF7A7A)) }
+                else TextButton(onClick = { vm.update { it.copy(whisperModel = m) }; vm.downloadWhisper(m) }, enabled = vm.whisperProgress == null) { Text("Baixar") }
+            }
+        }
+        vm.whisperProgress?.let { p ->
+            Text("Baixando modelo… $p%", color = Cyan, fontSize = 13.sp)
+            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Line)) {
+                Box(Modifier.fillMaxWidth(p / 100f).height(6.dp).background(Cyan))
+            }
+        }
     }
 }
 

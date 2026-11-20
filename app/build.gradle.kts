@@ -12,9 +12,15 @@ android {
         applicationId = "com.voxlink.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        versionCode = 3
+        versionName = "1.2.0"
+        ndk { abiFilters += listOf("arm64-v8a") }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DCMAKE_BUILD_TYPE=Release", "-DANDROID_STL=c++_shared")
+                cppFlags += listOf("-O3", "-std=c++17")
+            }
+        }
     }
 
     buildTypes {
@@ -29,6 +35,12 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
     lint { abortOnError = false; checkReleaseBuilds = false }
 }
 
@@ -43,7 +55,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:language-id:17.0.6")
-    implementation("com.microsoft.cognitiveservices.speech:client-sdk:1.40.0")
     implementation("com.belerweb:pinyin4j:2.5.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")

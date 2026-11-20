@@ -20,8 +20,9 @@ import com.voxlink.ai.model.Lang
 import com.voxlink.ai.model.RecognitionEngine
 import com.voxlink.ai.model.SAMPLE_PHRASES
 import com.voxlink.ai.model.TranslationMode
-import com.voxlink.ai.model.VoiceProvider
-import com.voxlink.ai.speech.AzureSpeechInput
+import com.voxlink.ai.model.WhisperModel
+import com.voxlink.ai.speech.WhisperModels
+import com.voxlink.ai.speech.WhisperSpeechInput
 import com.voxlink.ai.speech.SpeechEngine
 import com.voxlink.ai.speech.SpeechInput
 import com.voxlink.ai.translate.Glossary
@@ -29,7 +30,7 @@ import com.voxlink.ai.translate.LanguageDetector
 import com.voxlink.ai.translate.OfflineTranslator
 import com.voxlink.ai.translate.OnlineTranslator
 import com.voxlink.ai.tts.AndroidVoiceEngine
-import com.voxlink.ai.tts.AzureVoiceEngine
+import com.voxlink.ai.tts.AudioRouter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
@@ -74,17 +75,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     var androidVoices by mutableStateOf<List<Voice>>(emptyList()); private set
     var androidEngines by mutableStateOf<List<TextToSpeech.EngineInfo>>(emptyList()); private set
     var toast by mutableStateOf<String?>(null)
+    /** True while the offline Whisper engine (automatic language) is in use. */
+    var autoDetect by mutableStateOf(false); private set
+    /** Whisper model download progress (0-100) or null. */
+    var whisperProgress by mutableStateOf<Int?>(null); private set
+    var whisperReadyTick by mutableStateOf(0); private set
     val history = mutableStateListOf<Entry>()
 
     // ---- pipeline components (each behind a provider interface) ----
     private val speech = SpeechInput(ctx, this)
-    private val azureSpeech = AzureSpeechInput(this)
+    private val whisper = WhisperSpeechInput(ctx, this)
+    private val router = AudioRouter(ctx)
     private val detector = LanguageDetector()
     private val online = OnlineTranslator()
     private val offline = OfflineTranslator()
     private var glossary = Glossary(settings.glossary)
     var androidTts = AndroidVoiceEngine(ctx, settings.androidEngine); private set
-    private val azureTts = AzureVoiceEngine(ctx)
 
     private val processLock = Mutex()
     private var restartJob: Job? = null
@@ -100,15 +106,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     private var pendingDetected: Lang? = null
     private var flushJob: Job? = null
 
-    /** True when the Azure engine (continuous automatic language identification) is in use. */
-    val autoDetect: Boolean
-        get() = settings.recognitionEngine == RecognitionEngine.AZURE && settings.azureKey.isNotBlank()
-
-    private val activeSpeech: SpeechEngine get() = if (autoDetect) azureSpeech else speech
+    private var micPausedForTts = false
+    private var activeSpeech: SpeechEngine = speech
 
     private fun cancelSpeech() {
         speech.cancel()
-        azureSpeech.cancel()
+        whisper.cancel()
+    }
+
+    fun whisperReady(m: WhisperModel = settings.whisperModel): Boolean =
+        com.voxlink.ai.speech.WhisperLib.loaded && WhisperModels.ready(ctx, m)
+
+    /**
+     * Engine choice: Whisper when selected, or automatically when there is no internet
+     * (if the model is downloaded). Otherwise the free Google recogniser.
+     */
+    private fun chooseEngine(): RecognitionEngine {
+        val wantWhisper = settings.recognitionEngine == RecognitionEngine.WHISPER || !Net.online(ctx)
+        return if (wantWhisper && whisperReady()) RecognitionEngine.WHISPER else RecognitionEngine.ANDROID
     }
 
     init {
@@ -121,10 +136,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     // ================= Session control =================
 
     fun startSession() {
-        if (settings.recognitionEngine == RecognitionEngine.AZURE && settings.azureKey.isBlank()) {
-            toast = "Detecção automática precisa da chave Azure Speech (Configurações). Usando modo por turnos."
+        if (settings.recognitionEngine == RecognitionEngine.WHISPER && !whisperReady()) {
+            toast = "Baixe o modelo Whisper offline nas configurações. Usando o reconhecimento do Google por enquanto."
         }
-        if (!autoDetect && !speech.available) {
+        if (chooseEngine() == RecognitionEngine.ANDROID && !speech.available) {
             toast = "Reconhecimento de voz indisponível. Instale/atualize o app Google."
             status = "Reconhecimento de voz indisponível"
             return
@@ -170,7 +185,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     /** Force which language is expected next (tap on a language chip). */
     fun listenFor(l: Lang) {
         listenLang = l
-        if (sessionActive && !paused && !speaking) {
+        if (sessionActive && !paused && !micPausedForTts) {
             restartJob?.cancel()
             cancelSpeech()
             startListening()
@@ -178,17 +193,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
     }
 
     private fun startListening() {
-        if (!sessionActive || paused || speaking) return
+        if (!sessionActive || paused || micPausedForTts) return
         recLang = listenLang
         val silence = (settings.endPause * 1000).toLong()
+        val engine = chooseEngine()
+        val next: SpeechEngine = if (engine == RecognitionEngine.WHISPER) whisper else speech
+        if (next !== activeSpeech) activeSpeech.cancel()
+        activeSpeech = next
+        autoDetect = engine == RecognitionEngine.WHISPER
         speech.silenceMs = silence
-        azureSpeech.silenceMs = silence
-        azureSpeech.key = settings.azureKey
-        azureSpeech.region = settings.azureRegion
-        azureSpeech.candidates = (listOf(settings.me, settings.other) + Lang.entries).distinct()
+        speech.preferOffline = !Net.online(ctx)
+        whisper.silenceMs = silence
+        whisper.model = settings.whisperModel
+        whisper.candidates = (listOf(settings.me, settings.other) + Lang.entries).distinct()
         activeSpeech.start(recLang, listOf(other(recLang)))
         listening = true
-        status = if (autoDetect) "Ouvindo · 🌐 idioma automático" else "Ouvindo ${recLang.flag} ${recLang.label}…"
+        status = if (autoDetect) "Ouvindo · 🌐 idioma automático (offline)" else "Ouvindo ${recLang.flag} ${recLang.label}…"
     }
 
     private fun restartSoon(ms: Long = 250) {
@@ -235,7 +255,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                 pendingDetected = det
             }
             pendingText = joinSentences(pendingText, t)
-            scheduleFlush()
+            // Whisper already waited for the pause itself; the Google recogniser cuts on short pauses.
+            scheduleFlush(if (autoDetect) 250L else (settings.endPause * 1000).toLong())
         }
         restartSoon(100)
     }
@@ -293,10 +314,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
                 restartSoon(150)
                 return
             }
-            SpeechInput.AZURE_AUTH_ERROR -> {
-                stopSession()
-                status = SpeechInput.errorText(code)
-                toast = "Chave/região do Azure Speech inválida. Verifique nas configurações."
+            SpeechInput.WHISPER_NO_MODEL, SpeechInput.WHISPER_ERROR -> {
+                toast = "Whisper offline indisponível (${SpeechInput.errorText(code)}). Usando o Google."
+                update { it.copy(recognitionEngine = RecognitionEngine.ANDROID) }
+                restartSoon(300)
                 return
             }
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
@@ -397,6 +418,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         }
     }
 
+    fun downloadWhisper(m: WhisperModel = settings.whisperModel) {
+        if (whisperProgress != null) return
+        if (!com.voxlink.ai.speech.WhisperLib.loaded) {
+            toast = "Motor Whisper não disponível neste aparelho (precisa de processador 64-bit)."
+            return
+        }
+        viewModelScope.launch {
+            whisperProgress = 0
+            try {
+                WhisperModels.download(ctx, m) { whisperProgress = it }
+                whisperReadyTick++
+                toast = "Modelo Whisper pronto — reconhecimento offline ativado"
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                toast = "Falha ao baixar o modelo: ${e.message}"
+            } finally {
+                whisperProgress = null
+            }
+        }
+    }
+
+    fun deleteWhisper(m: WhisperModel) {
+        WhisperModels.file(ctx, m).delete()
+        whisperReadyTick++
+    }
+
     fun downloadOfflinePacks() {
         viewModelScope.launch {
             toast = "Baixando pacotes offline (≈30 MB por idioma)…"
@@ -422,36 +469,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (playJob?.isActive == true) return
         playJob = viewModelScope.launch {
             speaking = true
-            restartJob?.cancel()
-            cancelSpeech() // half-duplex: don't listen to our own voice
-            listening = false
-            rms = 0f
             try {
                 while (playQueue.isNotEmpty()) {
                     val (t, l) = playQueue.removeFirst()
-                    status = "Falando ${l.flag} ${l.label}…"
-                    speakOne(t, l)
+                    val device = outputFor(l)
+                    // Translation going to MY headphones: the mic can keep listening (full duplex).
+                    // Going to the loudspeaker: pause the mic so we never translate our own voice.
+                    if (!router.isHeadphones(device) && !micPausedForTts) {
+                        micPausedForTts = true
+                        restartJob?.cancel()
+                        flushJob?.cancel()
+                        cancelSpeech()
+                        listening = false
+                        rms = 0f
+                    }
+                    status = "Falando ${l.flag} ${l.label}" + if (router.isHeadphones(device)) " no fone 🎧" else "…"
+                    speakOne(t, l, device)
                 }
             } finally {
                 speaking = false
             }
-            if (sessionActive && !paused) restartSoon(350) else status = "Tradução pronta"
+            if (micPausedForTts) {
+                micPausedForTts = false
+                if (pendingText.isNotBlank()) scheduleFlush(300)
+                if (sessionActive && !paused) restartSoon(350) else status = "Tradução pronta"
+            } else if (!sessionActive) status = "Tradução pronta"
         }
     }
 
-    private suspend fun speakOne(text: String, lang: Lang) {
+    /** With headphones and split audio on: my language → headphones, the other's → loudspeaker. */
+    private fun outputFor(l: Lang): android.media.AudioDeviceInfo? {
+        if (!settings.splitAudio) return null
+        val phones = router.headphones() ?: return null
+        return if (l == settings.me) phones else router.speaker()
+    }
+
+    private suspend fun speakOne(text: String, lang: Lang, device: android.media.AudioDeviceInfo?) {
         val s = settings
-        val useAzure = s.voiceProvider == VoiceProvider.AZURE && s.azureKey.isNotBlank() && Net.online(ctx)
         try {
-            if (useAzure) azureTts.speak(text, lang, s) else androidTts.speak(text, lang, s)
+            androidTts.speak(text, lang, s, device)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (useAzure) {
-                toast = "Azure indisponível (${e.message}). Usando voz do Android."
-                runCatching { androidTts.speak(text, lang, s) }
-            } else {
-                toast = "Erro na voz: ${e.message}"
-            }
+            if (device != null) runCatching { androidTts.speak(text, lang, s, null) }
+            else toast = "Erro na voz: ${e.message}"
         }
     }
 
@@ -460,9 +520,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         playJob?.cancel()
         playJob = null
         androidTts.stop()
-        azureTts.stop()
         speaking = false
-        if (resume && sessionActive && !paused) restartSoon(300)
+        val wasPaused = micPausedForTts
+        micPausedForTts = false
+        if (resume && wasPaused && sessionActive && !paused) restartSoon(300)
     }
 
     fun replay() {
@@ -502,8 +563,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
         if (old.me != s.me || old.other != s.other) {
             if (listenLang != s.me && listenLang != s.other) listenFor(s.me)
         }
-        if (old.recognitionEngine != s.recognitionEngine || old.azureKey != s.azureKey || old.azureRegion != s.azureRegion) {
-            if (sessionActive && !paused && !speaking) {
+        if (old.recognitionEngine != s.recognitionEngine || old.whisperModel != s.whisperModel) {
+            if (sessionActive && !paused && !micPausedForTts) {
                 restartJob?.cancel()
                 cancelSpeech()
                 restartSoon(400)
@@ -537,9 +598,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app), SpeechInput.Callb
 
     override fun onCleared() {
         speech.destroy()
-        azureSpeech.destroy()
+        whisper.destroy()
         androidTts.shutdown()
-        azureTts.shutdown()
         offline.close()
     }
 }
